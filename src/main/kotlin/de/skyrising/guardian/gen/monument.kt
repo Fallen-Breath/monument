@@ -20,7 +20,7 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.system.exitProcess
 
-val INITIAL_MAX_THREADS = maxOf(Runtime.getRuntime().availableProcessors() - 2, 1)
+val INITIAL_MAX_THREADS = maxOf(Runtime.getRuntime().availableProcessors(), 1)
 var MAX_THREADS = INITIAL_MAX_THREADS
 
 val threadLocalContext: ThreadLocal<Context> = ThreadLocal.withInitial { Context.default }
