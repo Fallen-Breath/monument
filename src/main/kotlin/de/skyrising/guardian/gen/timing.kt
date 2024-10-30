@@ -87,6 +87,7 @@ object TraceEvents {
 
     @Synchronized
     fun start(path: Path) {
+        Files.createDirectories(path.parent)
         writer = if (GZ) GZIPOutputStream(Files.newOutputStream(path.resolveSibling(path.fileName.toString() + ".gz"))).bufferedWriter() else Files.newBufferedWriter(path)
         writer.write("[\n")
         active = true
