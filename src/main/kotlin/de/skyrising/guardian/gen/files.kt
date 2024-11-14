@@ -93,7 +93,7 @@ fun copy(path: Path, to: Path, vararg options: CopyOption) {
     })
 }
 
-fun copyCached(path: Path, to: Path, cacheDir: Path) {
+fun copyCached(path: Path, to: Path, cacheDir: Path, renameJarResource: Boolean = false) {
     Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
         override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes?): FileVisitResult {
             val dest = to.resolve(path.relativize(dir).toString())
@@ -103,7 +103,14 @@ fun copyCached(path: Path, to: Path, cacheDir: Path) {
 
         override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
             val content = Files.readAllBytes(file)
-            val dest = to.resolve(path.relativize(file).toString())
+            var srcPath = file
+            if (renameJarResource && file.fileName.toString().endsWith(".jar.resource")) {
+                // We need to store those .jar resources files with a non-".jar" extension,
+                // or the gradle shadow plugin will cause issues. Here's the operation to revert the rename
+                // See: https://github.com/skyrising/monument/issues/1
+                srcPath = file.resolveSibling(file.fileName.toString().removeSuffix(".jar.resource") + ".jar")
+            }
+            val dest = to.resolve(path.relativize(srcPath).toString())
             writeCached(dest, content, cacheDir)
             return FileVisitResult.CONTINUE
         }
@@ -352,8 +359,8 @@ private object Dummy
 fun extractGradleAndExtraSources(version: VersionInfo, out: Path): CompletableFuture<Unit> =
     supplyAsync(TaskType.EXTRACT_RESOURCE) {
         useResourceFileSystem(Dummy::class.java) {
-            copyCached(it.resolve("gradle_env"), out, RESOURCE_CACHE_DIR)
-            copyCached(it.resolve("extra_src"), out.resolve("src/main/java"), RESOURCE_CACHE_DIR)
+            copyCached(it.resolve("gradle_env"), out, RESOURCE_CACHE_DIR, true)
+            copyCached(it.resolve("extra_src"), out.resolve("src/main/java"), RESOURCE_CACHE_DIR, true)
         }
     }.thenCompose {
         generateGradleBuild(version, out)
