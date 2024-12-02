@@ -25,7 +25,7 @@ fun download(url: URI, file: Path, listener: ((DownloadProgress) -> Unit)? = nul
 private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) -> Unit)? = null) =
     supplyAsync(TaskType.DOWNLOAD) {
         Timer("", file.toString(), mapOf("url" to url.toString(), "file" to file.toString())).use {
-            if (Files.exists(file)) return@supplyAsync
+            if (Files.exists(file) && !(file.fileName.toString().endsWith(".jar") && !isJarGood(file))) return@supplyAsync
             println("Downloading $url")
             Files.createDirectories(file.parent)
             if (url.scheme == "file") {

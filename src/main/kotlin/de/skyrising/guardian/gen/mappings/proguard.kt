@@ -166,5 +166,7 @@ object ProguardMappings : LineBasedMappingFormat<Pair<MappingTree, ClassMapping?
 
 class ProguardMethodMapping(val lineFrom: Int, val lineTo: Int, defaultName: MemberDescriptor, names: Array<String>)
     : ArrayMemberMapping(defaultName, names), MethodMapping {
+    override val parameters: Map<Int, ParameterImpl> = mapOf()
+    override var comment: String? = null
     override fun invert(size: Int, index: Int, tree: MappingTree): ProguardMethodMapping = ProguardMethodMapping(lineFrom, lineTo, invertDefaultName(index, tree), invertNames(size, index))
 }

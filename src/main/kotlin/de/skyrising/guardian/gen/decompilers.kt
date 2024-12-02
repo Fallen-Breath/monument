@@ -3,8 +3,13 @@ package de.skyrising.guardian.gen
 import com.strobel.assembler.metadata.ITypeLoader
 import com.strobel.decompiler.DecompilerSettings
 import com.strobel.decompiler.PlainTextOutput
+import de.skyrising.guardian.gen.mappings.FabricJavadocProviderCreator
+import net.fabricmc.fernflower.api.IFabricJavadocProvider
 import org.benf.cfr.reader.api.CfrDriver
+import org.jetbrains.java.decompiler.main.Fernflower
 import org.jetbrains.java.decompiler.main.decompiler.ConsoleDecompiler
+import org.jetbrains.java.decompiler.main.decompiler.DirectoryResultSaver
+import org.jetbrains.java.decompiler.main.extern.IFernflowerLogger
 import org.jetbrains.java.decompiler.main.extern.IFernflowerPreferences
 import java.io.File
 import java.io.FileNotFoundException
@@ -38,7 +43,7 @@ interface Decompiler {
         val FORGEFLOWER = JavaDecompiler("forgeflower", "de.skyrising.guardian.gen.FernflowerDecompileTask")
         val FABRIFLOWER = JavaDecompiler("fabriflower", "de.skyrising.guardian.gen.FernflowerDecompileTask")
         val QUILTFLOWER = JavaDecompiler("quiltflower", "de.skyrising.guardian.gen.FernflowerDecompileTask")
-        val VINEFLOWER = JavaDecompiler("vineflower", "de.skyrising.guardian.gen.FernflowerDecompileTask")
+        val VINEFLOWER = JavaDecompiler("vineflower", "de.skyrising.guardian.gen.VineflowerDecompileTask")
         val PROCYON = JavaDecompiler("procyon", "de.skyrising.guardian.gen.ProcyonDecompileTask")
     }
 }
@@ -137,7 +142,7 @@ class DecompileTaskClassLoader(parent: ClassLoader) : ClassLoader(parent) {
         if (!name.startsWith("de.skyrising.guardian.gen.")) return false
         val outerClass = name.substringBefore('$')
         if (outerClass == DecompileTask::class.java.name) return false
-        return outerClass.endsWith("DecompileTask")
+        return outerClass.endsWith("DecompileTask") || outerClass.endsWith("FabricJavadocProviderCreator")
     }
 }
 
@@ -156,7 +161,7 @@ interface DecompileTask {
 
 @Suppress("unused")
 open class FernflowerDecompileTask : DecompileTask {
-    protected fun getArgs(jar: Path, outputDir: Path, cp: List<Path>?, defaults: Map<String, Any>): Array<String> {
+    open protected fun getArgs(jar: Path, outputDir: Path, cp: List<Path>?, defaults: Map<String, Any>): Array<String> {
         val args = mutableListOf("-${IFernflowerPreferences.INDENT_STRING}=    ")
         if ("jrt" in defaults) {
             args.add("-jrt=1")
@@ -207,6 +212,79 @@ open class FernflowerDecompileTask : DecompileTask {
                 if (cls.isNotEmpty()) listener(cls, preprocessing)
             }) {
                 ConsoleDecompiler.main(getArgs(clsOutput, srcOutput, cp, IFernflowerPreferences.DEFAULTS))
+            }
+        }
+        return srcOutput
+    }
+}
+
+class DecompileTaskJavadocCommentFileHolder {
+    companion object {
+        val files = mutableMapOf<String, Path>()  // version -> path to the comments.json
+    }
+}
+
+@Suppress("unused")
+open class VineflowerDecompileTask : DecompileTask {
+    override fun decompile(version: String, jar: Path, outputDir: (Boolean) -> Path, cp: List<Path>?, listener: (String,Boolean) -> Unit): Path {
+        val outDir = outputDir(false)
+        val clsOutput = outDir.resolve("bin")
+        val srcOutput = outDir.resolve("src")
+
+        val javadocCommentFile: Path?
+        synchronized(DecompileTaskJavadocCommentFileHolder.files) {
+            javadocCommentFile = DecompileTaskJavadocCommentFileHolder.files[version]
+        }
+
+        val executor = threadLocalContext.get().executor as CustomThreadPoolExecutor
+        val maxTotalThreads = maxOf(executor.parallelism - 4, 1)
+        val decompilers = executor.decompileParallelism
+        val threads = maxOf((maxTotalThreads + decompilers - 1) / decompilers, 1)
+        val options = mapOf(
+            IFernflowerPreferences.INDENT_STRING to "    ",
+            IFernflowerPreferences.INCLUDE_JAVA_RUNTIME to "1",
+            IFernflowerPreferences.INCLUDE_ENTIRE_CLASSPATH to "1",
+            IFernflowerPreferences.REMOVE_SYNTHETIC to "1",
+            IFernflowerPreferences.DECOMPILE_GENERIC_SIGNATURES to "1",
+            IFernflowerPreferences.THREADS to threads.toString(),
+            IFernflowerPreferences.PATTERN_MATCHING to "1",
+            IFabricJavadocProvider.PROPERTY_NAME to FabricJavadocProviderCreator.createFabricJavadocProviderFromJson(javadocCommentFile),
+        )
+
+        Timer(version, "decompile").use {
+            val saver = DirectoryResultSaver(srcOutput.toFile())
+            val ff = Fernflower(saver, options, object : IFernflowerLogger() {
+                override fun writeMessage(message: String?, severity: Severity?) {
+                    // TODO: make this actually work
+                    if (accepts(severity) && message != null) {
+                        var cls = message.substringAfter("Decompiling class ", "")
+                        var preprocessing = false
+                        if (cls.isEmpty()) {
+                            cls = message.substringAfter("Preprocessing class ", "")
+                            preprocessing = true
+                        }
+                        if (cls.isNotEmpty()) {
+                            listener(cls, preprocessing)
+                        }
+                    }
+                }
+
+                override fun writeMessage(message: String?, severity: Severity?, t: Throwable?) {
+                    if (accepts(severity)) {
+                        writeMessage(message, severity)
+                    }
+                }
+            })
+
+            if (cp != null) {
+                for (p in cp) ff.addLibrary(p.toFile())
+            }
+            ff.addSource(jar.toFile())
+
+            try {
+                ff.decompileContext()
+            } finally {
+                ff.clearContext()
             }
         }
         return srcOutput

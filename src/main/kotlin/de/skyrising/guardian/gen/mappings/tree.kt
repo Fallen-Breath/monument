@@ -7,7 +7,7 @@ open class MappingTree(val namespaces: Array<String>) {
     val classes = IndexedMemberList<String, ClassMapping>()
 
     fun invert(namespace: String) = invert(this.namespaces.indexOf(namespace))
-    fun invert(index: Int): MappingTree {
+    open fun invert(index: Int): MappingTree {
         val size = namespaces.size
         val inverted = MappingTree(Array(size) {
             when {
@@ -22,8 +22,8 @@ open class MappingTree(val namespaces: Array<String>) {
         return inverted
     }
 
-    fun mapType(name: String, index: Int) = classes[name]?.getName(index)
-    fun mapType(type: Type, index: Int): Type = when(type.sort) {
+    open fun mapType(name: String, index: Int) = classes[name]?.getName(index)
+    open fun mapType(type: Type, index: Int): Type = when(type.sort) {
         Type.ARRAY -> {
             val remappedDesc = StringBuilder()
             for (i in 0 until type.dimensions) remappedDesc.append('[')
@@ -42,7 +42,7 @@ open class MappingTree(val namespaces: Array<String>) {
         else -> type
     }
 
-    fun merge(other: MappingTree): MappingTree {
+    open fun merge(other: MappingTree): MappingTree {
         if (!namespaces.contentEquals(other.namespaces)) throw IllegalArgumentException("Incompatible namespaces, cannot merge mappings")
         val result = MappingTree(namespaces)
         val allClasses = linkedSetOf<String>()
@@ -74,6 +74,7 @@ open class MappingTree(val namespaces: Array<String>) {
 class ClassMapping(private val names: Array<String>) : Mapping<String> {
     val methods = IndexedMemberList<MemberDescriptor, MethodMapping>()
     val fields = IndexedMemberList<MemberDescriptor, FieldMapping>()
+    var comment: String? = null
 
     override val size get() = names.size
     override val defaultName get() = names[0]
@@ -84,6 +85,7 @@ class ClassMapping(private val names: Array<String>) : Mapping<String> {
         val inverted = ClassMapping(invertNames(size, index))
         for (m in methods) inverted.methods.add(m.invert(size, index, tree))
         for (f in fields) inverted.fields.add(f.invert(size, index, tree))
+        inverted.comment = comment
         return inverted
     }
 
@@ -151,9 +153,12 @@ interface MemberMapping : Mapping<MemberDescriptor> {
     }
 }
 interface MethodMapping : MemberMapping {
+    val parameters: Map<Int, ParameterImpl>
+    var comment: String?
     override fun invert(size: Int, index: Int, tree: MappingTree): MethodMapping
 }
 interface FieldMapping : MemberMapping {
+    var comment: String?
     override fun invert(size: Int, index: Int, tree: MappingTree): FieldMapping
 }
 
@@ -180,17 +185,32 @@ abstract class ArrayMemberMapping(override val defaultName: MemberDescriptor, pr
 }
 
 open class MethodMappingImpl(defaultName: MemberDescriptor, names: Array<String>) : ArrayMemberMapping(defaultName, names), MethodMapping {
-    override fun invert(size: Int, index: Int, tree: MappingTree): MethodMapping = MethodMappingImpl(invertDefaultName(index, tree), invertNames(size, index))
+    override val parameters = mutableMapOf<Int, ParameterImpl>()
+    override var comment: String? = null
+
+    override fun invert(size: Int, index: Int, tree: MappingTree): MethodMapping {
+        val inverted = MethodMappingImpl(invertDefaultName(index, tree), invertNames(size, index))
+        inverted.comment = comment
+        return inverted
+    }
 
     override fun equals(other: Any?) = other is MethodMapping && super.equals(other)
     override fun hashCode() = super.hashCode()
 }
 open class FieldMappingImpl(defaultName: MemberDescriptor, names: Array<String>) : ArrayMemberMapping(defaultName, names), FieldMapping {
-    override fun invert(size: Int, index: Int, tree: MappingTree): FieldMapping = FieldMappingImpl(invertDefaultName(index, tree), invertNames(size, index))
+    override var comment: String? = null
+
+    override fun invert(size: Int, index: Int, tree: MappingTree): FieldMapping {
+        val inverted = FieldMappingImpl(invertDefaultName(index, tree), invertNames(size, index))
+        inverted.comment = comment
+        return inverted
+    }
 
     override fun equals(other: Any?) = other is FieldMapping && super.equals(other)
     override fun hashCode() = super.hashCode()
 }
+
+class ParameterImpl(var name: String, var comment: String?)
 
 
 class IndexedMemberList<T, M: Mapping<T>> : AbstractMutableSet<M>() {

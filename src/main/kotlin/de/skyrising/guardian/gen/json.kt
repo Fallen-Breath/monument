@@ -151,6 +151,7 @@ val GSON: Gson = GsonBuilder()
             "fabric-intermediary" -> MappingProvider.FABRIC_INTERMEDIARY
             "legacy-intermediary" -> MappingProvider.LEGACY_INTERMEDIARY
             "quilt-intermediary" -> MappingProvider.QUILT_INTERMEDIARY
+            "yarn" -> MappingProvider.YARN
             else -> throw IllegalArgumentException("Unknown mapping provider '$s'")
         }
     }

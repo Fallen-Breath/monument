@@ -1,5 +1,6 @@
 package de.skyrising.guardian.gen.mappings
 
+import org.objectweb.asm.Type
 import java.io.BufferedReader
 import java.util.stream.Stream
 
@@ -80,6 +81,7 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
         if (indent > state.indent + 1) throw IllegalArgumentException("Invalid indent level")
         if (indent == 0) state.currentClass = null
         if (indent <= 1) state.currentMember = null
+        if (indent <= 2) state.currentParameter = null
         when (parts[indent]) {
             "c" -> {
                 if (indent == 0) {
@@ -90,6 +92,25 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
                         throw IllegalArgumentException("Duplicate class name ${c.defaultName}")
                     }
                     state.tree.classes.add(c)
+                }
+                if (indent == 1) {
+                    val c = state.currentClass ?: throw IllegalStateException("Class comment without a class")
+                    val raw = parts.subList(indent + 1, parts.size).joinToString("\t")
+                    c.comment = unescape(raw)
+                }
+                if (indent == 2) {
+                    val m = state.currentMember ?: throw IllegalStateException("Member comment without a member")
+                    val raw = parts.subList(indent + 1, parts.size).joinToString("\t")
+                    if (m is FieldMappingImpl) {
+                        m.comment = unescape(raw)
+                    } else if (m is MethodMappingImpl) {
+                        m.comment = unescape(raw)
+                    }
+                }
+                if (indent == 3) {
+                    val p = state.currentParameter ?: throw IllegalStateException("Parameter comment without a parameter")
+                    val raw = parts.subList(indent + 1, parts.size).joinToString("\t")
+                    p.comment = unescape(raw)
                 }
             }
             "f" -> {
@@ -118,8 +139,22 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
                     c.methods.add(m)
                 }
             }
+            "p" -> {
+                if (indent == 2) {
+                    val idx = parts[3].toInt()
+                    val name = parts[5]
+                    val m = state.currentMember ?: throw IllegalStateException("Parameter comment without a method")
+                    if (m !is MethodMappingImpl) {
+                        throw IllegalStateException("Parameter comment without a method, found ${m}")
+                    }
+                    val p = ParameterImpl(name, null)
+                    m.parameters[idx] = p
+                    state.currentParameter = p
+                }
+            }
             else -> println(parts)
         }
+        state.indent = indent
         return state
     }
 
@@ -165,6 +200,7 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
 class TinyStateV2(header: TinyHeader) : TinyState<TinyMappingTreeV2>(header, TinyMappingTreeV2(header.namespaces.toTypedArray())) {
     var currentClass: ClassMapping? = null
     var currentMember: MemberMapping? = null
+    var currentParameter: ParameterImpl? = null
     var indent = 0
 
     val top get() = when {
@@ -180,4 +216,19 @@ data class TinyHeader(val major: Int, val minor: Int, val namespaces: List<Strin
 
 class TinyMappingTreeV2(namespaces: Array<String>) : MappingTree(namespaces) {
     val properties = linkedMapOf<String, String>()
+}
+
+class CombinedYarnMappingTree(val intermediary: MappingTree, val yarn: MappingTree) : MappingTree(arrayOf("official", "name")) {
+    override fun invert(index: Int): MappingTree {
+        throw UnsupportedOperationException()
+    }
+    override fun mapType(name: String, index: Int): String? {
+        throw UnsupportedOperationException()
+    }
+    override fun mapType(type: Type, index: Int): Type  {
+        throw UnsupportedOperationException()
+    }
+    override fun merge(other: MappingTree): MappingTree {
+        throw UnsupportedOperationException()
+    }
 }

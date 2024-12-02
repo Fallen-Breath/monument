@@ -346,8 +346,10 @@ fun spellVersions(count: Int) = if (count == 1) "$count version" else "$count ve
 fun getSourcePath(version: String, mappings: MappingProvider, decompiler: Decompiler): Path = SOURCES_DIR.resolve(mappings.name).resolve(decompiler.name).resolve(version)
 
 fun getMappedMergedJar(version: VersionInfo, provider: MappingProvider): CompletableFuture<Path> {
-    val mappedJarPath = getMappedJarOutput(provider.name, JARS_MERGED_DIR.resolve("${version.id}.jar"))
-    if (Files.exists(mappedJarPath) && isJarGood(mappedJarPath)) return CompletableFuture.completedFuture(mappedJarPath)
+    if (provider.canSkipFinishedMappedJar(MAPPINGS_CACHE_DIR, version)) {
+        val mappedJarPath = getMappedJarOutput(provider.name, JARS_MERGED_DIR.resolve("${version.id}.jar"))
+        if (Files.exists(mappedJarPath) && isJarGood(mappedJarPath)) return CompletableFuture.completedFuture(mappedJarPath)
+    }
     val jar = getJar(version, MappingTarget.MERGED)
     val mappings = getMappings(provider, version, MappingTarget.MERGED)
     return CompletableFuture.allOf(jar, mappings).thenCompose {

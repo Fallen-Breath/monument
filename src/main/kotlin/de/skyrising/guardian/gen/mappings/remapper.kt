@@ -86,12 +86,38 @@ fun mapJar(version: String, input: Path, mappings: MappingTree, provider: String
 
 fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, namespace: Int = mappings.namespaces.size - 1) = supplyAsync(TaskType.REMAP) {
     getJarFileSystem(input).use { inFs ->
+        fun remapOnce(classNodes: Map<String, ClassNode>, subMappings: MappingTree, idx: Int): Map<String, ClassNode> {
+            val superClasses = mutableMapOf<String, MutableSet<String>>()
+            val remappedNodes = linkedMapOf<String, ClassNode>()
+            classNodes.entries.forEach { (className, classNode) ->
+                val supers = linkedSetOf<String>()
+                val superName = classNode.superName
+                if (superName != null) supers.add(superName)
+                supers.addAll(classNode.interfaces)
+                superClasses[className] = supers
+            }
+            Timer(version, "remapJar${idx}").use {
+                val classNames = superClasses.keys
+                for (supers in superClasses.values) supers.retainAll(classNames)
+                val remapper = AsmRemapper(subMappings, superClasses, namespace)
+                for ((className, classNode) in classNodes) {
+                    val remappedNode = ClassNode()
+                    classNode.accept(ClassRemapper(remappedNode, remapper))
+                    fixBridgeMethods(remappedNode)
+                    renameLocalVariables(remappedNode, subMappings.classes[className])
+                    val remappedName = remapper.map(className) ?: className
+                    remappedNodes[remappedName] = remappedNode
+                }
+            }
+            return remappedNodes
+        }
+
         createJarFileSystem(output).use { outFs ->
             val inRoot = inFs.getPath("/")
             val outRoot = outFs.getPath("/")
-            val classNodes = linkedMapOf<String, ClassNode>()
-            val superClasses = mutableMapOf<String, MutableSet<String>>()
-            Timer(version, "remapJarIndex").use {
+
+            val readNodes = linkedMapOf<String, ClassNode>()
+            Timer(version, "remapJarRead").use {
                 Files.walk(inRoot).forEach {
                     if (it.parent != null) {
                         if (it.parent != null && !Files.isDirectory(it)) {
@@ -101,44 +127,38 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
                                 val classReader = ClassReader(Files.readAllBytes(it))
                                 val classNode = ClassNode()
                                 classReader.accept(classNode, 0)
-                                classNodes[className] = classNode
-                                val supers = linkedSetOf<String>()
-                                val superName = classNode.superName
-                                if (superName != null) supers.add(superName)
-                                supers.addAll(classNode.interfaces)
-                                superClasses[className] = supers
+                                readNodes[className] = classNode
                             }
                         }
                     }
                 }
             }
-            Timer(version, "remapJarWrite").use {
-                val classNames = superClasses.keys
-                for (supers in superClasses.values) supers.retainAll(classNames)
-                val remapper = AsmRemapper(mappings, superClasses, namespace)
-                for ((className, classNode) in classNodes) {
-                    val remappedNode = ClassNode()
-                    val classRemapper = object : ClassRemapper(remappedNode, remapper) {
+            var classNodes: Map<String, ClassNode> = readNodes
 
+            val mappingTreeSequence = mutableListOf<MappingTree>()
+            if (mappings is CombinedYarnMappingTree) {
+                mappingTreeSequence.add(mappings.intermediary)
+                mappingTreeSequence.add(mappings.yarn)
+            } else {
+                mappingTreeSequence.add(mappings)
+            }
+            mappingTreeSequence.forEachIndexed { i, sm ->
+                classNodes = remapOnce(classNodes, sm, i)
+            }
 
-                    }
-                    classNode.accept(classRemapper)
-                    fixBridgeMethods(remappedNode)
-                    renameLocalVariables(remappedNode)
-                    val remappedName = remapper.map(className) ?: throw IllegalArgumentException("$className could not be remapped")
-                    if (remappedNode.sourceFile == null) {
-                        var end = remappedName.indexOf('$')
-                        if (end < 0) end = remappedName.length
-                        val start = remappedName.lastIndexOf('/', end) + 1
-                        val name = remappedName.substring(start, end)
-                        remappedNode.sourceFile = "$name.java"
-                    }
-                    val classWriter = ClassWriter(0)
-                    remappedNode.accept(classWriter)
-                    val outPath = outRoot.resolve("$remappedName.class")
-                    Files.createDirectories(outPath.parent)
-                    Files.write(outPath, classWriter.toByteArray())
+            for ((className, classNode) in classNodes) {
+                if (classNode.sourceFile == null) {
+                    var end = className.indexOf('$')
+                    if (end < 0) end = className.length
+                    val start = className.lastIndexOf('/', end) + 1
+                    val name = className.substring(start, end)
+                    classNode.sourceFile = "$name.java"
                 }
+                val classWriter = ClassWriter(0)
+                classNode.accept(classWriter)
+                val outPath = outRoot.resolve("$className.class")
+                Files.createDirectories(outPath.parent)
+                Files.write(outPath, classWriter.toByteArray())
             }
         }
     }
@@ -149,7 +169,7 @@ class LocalVariableRenamer {
     private val nameCounts = HashMap<String, Int>()
     private val defaultLvNamePattern = Pattern.compile("^lvt\\d+$")
 
-    fun process(methodNode: MethodNode) {
+    fun process(methodNode: MethodNode, methodMapping: MethodMapping?) {
         if (methodNode.localVariables == null) {
             return
         }
@@ -160,9 +180,16 @@ class LocalVariableRenamer {
             if (!isStatic && lv.index == 0) {
                 continue  // this
             }
-            if (defaultLvNamePattern.matcher(lv.name).matches()) {
+            val paramName = methodMapping?.parameters?.get(lv.index)?.name
+            var needsRename = false
+            if (paramName != null) {
+                lv.name = paramName
+            } else if (defaultLvNamePattern.matcher(lv.name).matches()) {
                 toRename.add(lv)
-            } else {
+                needsRename = true
+            }
+
+            if (!needsRename){
                 names.add(lv.name)
                 nameCounts[lv.name] = 1
             }
@@ -287,9 +314,14 @@ class LocalVariableRenamer {
     }
 }
 
-fun renameLocalVariables(remappedNode: ClassNode) {
+fun renameLocalVariables(remappedNode: ClassNode, classMapping: ClassMapping?) {
+    val rmm = mutableMapOf<MemberDescriptor, MethodMapping>()
+    classMapping?.methods?.keys?.forEach { key ->
+        val mm = classMapping.methods[key]!!
+        rmm[MemberDescriptor(mm[1], key.type)] = mm
+    }
     for (methodNode in remappedNode.methods) {
-        LocalVariableRenamer().process(methodNode)
+        LocalVariableRenamer().process(methodNode, rmm[MemberDescriptor(methodNode.name, methodNode.desc)])
     }
 }
 
