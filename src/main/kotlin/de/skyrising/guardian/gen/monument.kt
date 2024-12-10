@@ -367,11 +367,24 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
     val javaOut = out.resolve("src/main/java")
     var tmpOutFs: FileSystem? = null
     var tmpOutPath: Path? = null
+    val decompilerArtifact = decompilerMap[decompiler]!!.first().artifact
     Files.write(out.resolve(".monument"), listOf(
         "Monument version: $MONUMENT_VERSION",
-        "Decompiler: " + decompilerMap[decompiler]!!.first().artifact
+        "Decompiler: $decompilerArtifact",
     ))
-    val jarFuture = unit(getMappedMergedJar(version, provider))
+    val jarFuture = unit(getMappedMergedJar(version, provider)).thenApply {
+        // Not the provider finishes inited, so we can output some information about it
+        Files.write(out.resolve("README.md"), listOf(
+            "# Minecraft", "",
+            "- Minecraft version: `${version.id}`",
+            "- Mapping type: `${provider.name}`",
+            "- Mapping version: `${provider.getVersion()}`",
+            "- Decompiler: `${decompilerArtifact}`",
+            "",
+            "**DO NOT REDISTRIBUTE**"
+        ))
+        it
+    }
     val libsFuture = unit(downloadLibraries(version))
     return CompletableFuture.allOf(jarFuture, libsFuture).thenCompose {
         val extractResources = unit(getJar(version, MappingTarget.CLIENT)).thenCompose { jar ->
