@@ -383,8 +383,11 @@ fun getMonumentClassRoot(): Path? {
     }
 }
 
-fun isJarGood(jarPath: Path): Boolean {
+fun isJarGood(jarPath: Path, minSize: Int = 0): Boolean {
     return try {
+        if (Files.size(jarPath) < minSize) {
+            return false
+        }
         ZipFile(jarPath.toFile()).use { zip ->
             for (entry in zip.entries()) {
                 zip.getInputStream(entry).use { }
