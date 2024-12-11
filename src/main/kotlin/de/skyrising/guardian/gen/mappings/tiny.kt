@@ -82,10 +82,24 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
         if (indent == 0) state.currentClass = null
         if (indent <= 1) state.currentMember = null
         if (indent <= 2) state.currentParameter = null
+
+        fun fixEmptyNames(names: MutableList<String>) {
+            names.forEachIndexed { i, name ->
+                // some yarn mappings has empty mapped class names, which is bad for further processing
+                // example: mc1.19.1-pre1, net/minecraft/class_7581$class_7585
+                // here's the fix: replace it with the default name (hopefully the default name is not empty)
+                if (name == "" && i == 0) throw IllegalArgumentException("Bad mapping names $names")
+                if (name == "" && i > 0) {
+                    names[i] = names[0]
+                }
+            }
+        }
+
         when (parts[indent]) {
             "c" -> {
                 if (indent == 0) {
-                    val names = parts.subList(1, parts.size).map(state::unescape)
+                    val names = parts.subList(1, parts.size).map(state::unescape).toMutableList()
+                    fixEmptyNames(names)
                     val c = ClassMapping(names.toTypedArray())
                     state.currentClass = c
                     if (state.tree.classes.containsKey(c.defaultName)) {
@@ -116,7 +130,8 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
             "f" -> {
                 if (indent == 1) {
                     val type = parts[2]
-                    val names = parts.subList(3, parts.size).map(state::unescape)
+                    val names = parts.subList(3, parts.size).map(state::unescape).toMutableList()
+                    fixEmptyNames(names)
                     val f = FieldMappingImpl(MemberDescriptor(names[0], type), names.toTypedArray())
                     state.currentMember = f
                     val c = state.currentClass ?: throw IllegalStateException("Field without a class")
@@ -129,7 +144,8 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
             "m" -> {
                 if (indent == 1) {
                     val type = parts[2]
-                    val names = parts.subList(3, parts.size).map(state::unescape)
+                    val names = parts.subList(3, parts.size).map(state::unescape).toMutableList()
+                    fixEmptyNames(names)
                     val m = MethodMappingImpl(MemberDescriptor(names[0], type), names.toTypedArray())
                     state.currentMember = m
                     val c = state.currentClass ?: throw IllegalStateException("Method without a class")
