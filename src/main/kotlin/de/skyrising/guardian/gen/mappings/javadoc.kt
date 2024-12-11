@@ -2,7 +2,6 @@ package de.skyrising.guardian.gen.mappings
 
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
-import com.google.gson.annotations.SerializedName
 import net.fabricmc.fernflower.api.IFabricJavadocProvider
 import org.jetbrains.java.decompiler.struct.StructClass
 import org.jetbrains.java.decompiler.struct.StructField
@@ -10,21 +9,10 @@ import org.jetbrains.java.decompiler.struct.StructMethod
 import java.nio.file.Files
 import java.nio.file.Path
 
-data class JavadocMethodParameterData(
-    @SerializedName("name") val name: String,
-    @SerializedName("comment") val comment: String,
-)
+data class JavadocMethodParameterData(val name: String, val comment: String)
+data class JavadocMethodData(val comment: String?, val parameters: List<JavadocMethodParameterData>)
+data class JavadocClassData(val comment: String?, val fields: Map<String, String>, val methods: Map<String, JavadocMethodData>)
 
-data class JavadocMethodData(
-    @SerializedName("comment") val comment: String?,
-    @SerializedName("parameters") val parameters: List<JavadocMethodParameterData>,
-)
-
-data class JavadocClassData(
-    @SerializedName("comment") val comment: String?,
-    @SerializedName("fields") val fields: Map<String, String>,
-    @SerializedName("methods") val methods: Map<String, JavadocMethodData>,
-)
 class JavadocData : LinkedHashMap<String, JavadocClassData>()
 
 // A holder class, to prevent accidental class loading

@@ -121,8 +121,8 @@ fun writeMappingMetadata(metadata: MappingMetadata, file: Path) {
 }
 
 class YarnMappingProvider(private val meta: URI, private val maven: URI) : CommonMappingProvider("yarn", GenericTinyReader, "jar") {
-    private fun getMetadataJsonDstFile(cache: Path, version: VersionInfo, mappings: String?): Path = getPath(cache, version, mappings).resolve("mappings_metadata.json")
-    private fun getCommentJsonDstFile(cache: Path, version: VersionInfo, mappings: String?): Path = getPath(cache, version, mappings).resolve("mappings_comments.json")
+    private fun getMetadataJsonDstFile(cache: Path, version: VersionInfo, mappings: String?): Path = getPath(cache, version, mappings).resolve("mappings-metadata.json")
+    private fun getCommentJsonDstFile(cache: Path, version: VersionInfo, mappings: String?): Path = getPath(cache, version, mappings).resolve("mappings-comments.json")
     private fun getMappingFileInSrcJar(jar: FileSystem): Path = jar.getPath("mappings/mappings.tiny")
     private var mappingVersion: String? = null
     private var allYarnVersions: CompletableFuture<Set<String>?>? = null
