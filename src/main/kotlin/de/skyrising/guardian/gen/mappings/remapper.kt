@@ -26,30 +26,33 @@ class AsmRemapper(private val tree: MappingTree, private val superClasses: Map<S
 
     override fun mapFieldName(owner: String?, name: String?, descriptor: String?): String? {
         if (owner == null || name == null || descriptor == null) return null
-        return mapFieldName0(tree.classes[owner], MemberDescriptor(name, descriptor)) ?: name
+        return mapFieldName0(tree.classes[owner], owner, MemberDescriptor(name, descriptor)) ?: name
     }
 
-    private fun mapFieldName0(owner: ClassMapping?, member: MemberDescriptor): String? =
-        mapMember(owner, member, { o, f -> o.fields[f] }, ::mapFieldName0)
+    private fun mapFieldName0(owner: ClassMapping?, ownerName: String, member: MemberDescriptor): String? =
+        mapMember(owner, ownerName, member, { o, f -> o.fields[f] }, ::mapFieldName0)
 
     override fun mapMethodName(owner: String?, name: String?, descriptor: String?): String? {
         if (owner == null || name == null || descriptor == null) return null
-        return mapMethodName0(tree.classes[owner], MemberDescriptor(name, descriptor)) ?: name
+        return mapMethodName0(tree.classes[owner], owner, MemberDescriptor(name, descriptor)) ?: name
     }
 
-    private fun mapMethodName0(owner: ClassMapping?, member: MemberDescriptor): String? =
-        mapMember(owner, member, { o, m -> o.methods[m] }, ::mapMethodName0)
+    private fun mapMethodName0(owner: ClassMapping?, ownerName: String, member: MemberDescriptor): String? =
+        mapMember(owner, ownerName, member, { o, m -> o.methods[m] }, ::mapMethodName0)
 
-    private inline fun mapMember(owner: ClassMapping?, member: MemberDescriptor,
+    // fallen: add the ownerName parameter.
+    // for those whose owner class mapping do not exist, their superclass class mapping might still exist. give them a chance
+    private inline fun mapMember(owner: ClassMapping?, ownerName: String, member: MemberDescriptor,
                                  getMember: (ClassMapping, MemberDescriptor) -> MemberMapping?,
-                                 recurse: (ClassMapping?, MemberDescriptor) -> String?
+                                 recurse: (ClassMapping?, String, MemberDescriptor) -> String?
     ): String? {
-        if (owner == null) return null
-        val mapped = getMember(owner, member)
-        if (mapped != null) return mapped.getName(namespace)
-        val supers = superClasses[owner.defaultName] ?: return null
+        if (owner != null) {
+            val mapped = getMember(owner, member)
+            if (mapped != null) return mapped.getName(namespace)
+        }
+        val supers = superClasses[ownerName] ?: return null
         for (superClass in supers) {
-            val superMapped = recurse(tree.classes[superClass], member)
+            val superMapped = recurse(tree.classes[superClass], superClass, member)
             if (superMapped != null) return superMapped
         }
         return null
