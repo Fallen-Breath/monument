@@ -153,7 +153,7 @@ interface MemberMapping : Mapping<MemberDescriptor> {
     }
 }
 interface MethodMapping : MemberMapping {
-    val parameters: Map<Int, ParameterImpl>
+    val parameters: MutableMap<Int, ParameterImpl>
     var comment: String?
     override fun invert(size: Int, index: Int, tree: MappingTree): MethodMapping
 }
@@ -191,6 +191,7 @@ open class MethodMappingImpl(defaultName: MemberDescriptor, names: Array<String>
     override fun invert(size: Int, index: Int, tree: MappingTree): MethodMapping {
         val inverted = MethodMappingImpl(invertDefaultName(index, tree), invertNames(size, index))
         inverted.comment = comment
+        inverted.parameters.putAll(parameters)
         return inverted
     }
 
@@ -210,6 +211,7 @@ open class FieldMappingImpl(defaultName: MemberDescriptor, names: Array<String>)
     override fun hashCode() = super.hashCode()
 }
 
+// FIXME: Does not support multiple namespaces. User need to remember what namespace the "name" is in
 class ParameterImpl(var name: String, var comment: String?)
 
 

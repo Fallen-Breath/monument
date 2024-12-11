@@ -9,8 +9,8 @@ import org.jetbrains.java.decompiler.struct.StructMethod
 import java.nio.file.Files
 import java.nio.file.Path
 
-data class JavadocMethodParameterData(val name: String, val comment: String)
-data class JavadocMethodData(val comment: String?, val parameters: List<JavadocMethodParameterData>)
+data class JavadocMethodParameterData(val name: String, val comment: String?)
+data class JavadocMethodData(val comment: String?, val parameters: Map<Int, JavadocMethodParameterData>)
 data class JavadocClassData(val comment: String?, val fields: Map<String, String>, val methods: Map<String, JavadocMethodData>)
 
 class JavadocData : LinkedHashMap<String, JavadocClassData>()
@@ -74,7 +74,9 @@ class FabricJavadocProviderCreator {
                     }
 
                     var needsNewLine = lines.size > 0
-                    methodData.parameters.forEach { paramData ->
+                    methodData.parameters.keys.sorted().forEach { idx ->
+                        val paramData = methodData.parameters[idx]!!
+                        if (paramData.comment == null) return@forEach
                         if (needsNewLine) {
                             needsNewLine = false
                             lines.add("")
@@ -129,7 +131,7 @@ class FabricJavadocProviderCreator {
 
 class MappingTreeJavadocDumper(private val classes: IndexedMemberList<String, ClassMapping>) {
     fun dumpToJsonFile(file: Path) {
-        val data = mutableMapOf<String, Any>()
+        val data = mutableMapOf<String, JavadocClassData>()
         classes.forEach { cm ->
             val fields = mutableMapOf<String, String>()
             cm.fields.forEach { fm ->
@@ -139,11 +141,9 @@ class MappingTreeJavadocDumper(private val classes: IndexedMemberList<String, Cl
             }
             val methods = mutableMapOf<String, JavadocMethodData>()
             cm.methods.forEach { mm ->
-                val parameters = mutableListOf<JavadocMethodParameterData>()
-                mm.parameters.values.forEach{ pm ->
-                    if (pm.comment != null) {
-                        parameters.add(JavadocMethodParameterData(pm.name, pm.comment!!))
-                    }
+                val parameters = mutableMapOf<Int, JavadocMethodParameterData>()
+                mm.parameters.toSortedMap().forEach { (idx, pm) ->
+                    parameters[idx] = (JavadocMethodParameterData(pm.name, pm.comment))
                 }
                 if (mm.comment != null || parameters.isNotEmpty()) {
                     methods[mm.defaultName.toString()] = JavadocMethodData(mm.comment, parameters)
@@ -154,11 +154,7 @@ class MappingTreeJavadocDumper(private val classes: IndexedMemberList<String, Cl
                 return@forEach
             }
 
-            val cls = mutableMapOf<String, Any?>()
-            cls["comment"] = cm.comment
-            cls["fields"] = fields
-            cls["methods"] = methods
-            data[cm.defaultName] = cls
+            data[cm.defaultName] = JavadocClassData(cm.comment, fields, methods)
         }
 
         Files.newBufferedWriter(file).use { writer ->

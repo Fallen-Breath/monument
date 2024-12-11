@@ -5,12 +5,16 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
 import com.google.gson.annotations.SerializedName
 import de.skyrising.guardian.gen.*
+import java.io.FileInputStream
+import java.io.InputStream
 import java.net.URI
 import java.nio.file.FileSystem
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
+import java.util.function.Function
 import java.util.regex.Pattern
+import java.util.zip.ZipInputStream
 
 val JARS_MAPPED_DIR: Path = JARS_DIR.resolve("mapped")
 
@@ -33,19 +37,20 @@ interface MappingProvider {
     fun canSkipFinishedMappedJar(cache: Path, version: VersionInfo): Boolean {
         return true
     }
+    fun postProcessMergedVersion(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path, mappingTree: MappingTree?): CompletableFuture<MappingTree?> = CompletableFuture.completedFuture(mappingTree)
+    fun postProcessMerged(version: VersionInfo, target: MappingTarget, cache: Path, mappingTree: MappingTree?): CompletableFuture<MappingTree?> {
+        return getLatestMappingVersion(version, target, cache).thenCompose { mv ->
+            postProcessMergedVersion(version, mv, target, cache, mappingTree)
+        }
+    }
 
     companion object {
-        val MOJANG = object : CommonMappingProvider("mojang", ProguardMappings, "txt", "official") {
-            override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> =
-                if (target == MappingTarget.MERGED) CompletableFuture.completedFuture(null)
-                else getMojangVersionManifest(version).thenApply { manifest ->
-                    manifest["downloads"]?.asJsonObject?.get(target.id + "_mappings")?.asJsonObject?.get("url")?.asString?.let { URI(it) }
-                }
-        }
+        val MOJANG = MojangMappingProvider("mojang")
         val FABRIC_INTERMEDIARY = IntermediaryMappingProvider("fabric", URI("https://meta.fabricmc.net/v2/"), URI("https://maven.fabricmc.net/"))
         val LEGACY_INTERMEDIARY = IntermediaryMappingProvider("legacy", URI("https://meta.legacyfabric.net/v2/"), URI("https://maven.legacyfabric.net/"))
         val QUILT_INTERMEDIARY = IntermediaryMappingProvider("quilt", URI("https://meta.quiltmc.org/v3/"), URI("https://maven.quiltmc.org/repository/release/"))
         val YARN = YarnMappingProvider(URI("https://meta.fabricmc.net/v2/"), URI("https://maven.fabricmc.net/"))
+        val PARCHMENT = ParchmentMappingProvider("parchment", URI("https://maven.parchmentmc.org/"))
     }
 }
 
@@ -89,6 +94,14 @@ abstract class JarMappingProvider(override val name: String, override val format
     }
 }
 
+open class MojangMappingProvider(override val name: String) : CommonMappingProvider(name, ProguardMappings, "txt", "official") {
+    override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> =
+        if (target == MappingTarget.MERGED) CompletableFuture.completedFuture(null)
+        else getMojangVersionManifest(version).thenApply { manifest ->
+            manifest["downloads"]?.asJsonObject?.get(target.id + "_mappings")?.asJsonObject?.get("url")?.asString?.let { URI(it) }
+        }
+}
+
 class IntermediaryMappingProvider(prefix: String, private val meta: URI, private val maven: URI) : JarMappingProvider("$prefix-intermediary", GenericTinyReader) {
     override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> {
         if (target != MappingTarget.MERGED) return CompletableFuture.completedFuture(null)
@@ -107,46 +120,69 @@ data class MappingMetadata(
     @SerializedName("version") val version: String,
 )
 
-fun readMappingMetadata(file: Path): MappingMetadata {
-    return Files.newBufferedReader(file).use { reader ->
-        return@use Gson().fromJson(reader, MappingMetadata::class.java)
-    }
-}
+class AdvancedMappingHelper(private val provider: MappingProvider) {
+    private var mappingVersion: String? = null
 
-fun writeMappingMetadata(metadata: MappingMetadata, file: Path) {
-    Files.newBufferedWriter(file).use { writer ->
-        val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
-        gson.toJson(metadata, writer)
+    fun getMappingVersion(): String = this.mappingVersion ?: "unknown"
+    fun setMappingVersion(ver: String) { this.mappingVersion = ver }
+    fun getMetadataJsonFile(cache: Path, version: VersionInfo, mappings: String?): Path = provider.getPath(cache, version, mappings).resolve("mappings-metadata.json")
+    fun getCommentJsonFile(cache: Path, version: VersionInfo, mappings: String?): Path = provider.getPath(cache, version, mappings).resolve("mappings-comments.json")
+
+    fun writeMetadata(cache: Path, version: VersionInfo, mappings: String?) {
+        Files.newBufferedWriter(getMetadataJsonFile(cache, version, mappings)).use { writer ->
+            val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
+            gson.toJson(MappingMetadata(provider.name, getMappingVersion()), writer)
+        }
+    }
+
+    fun writeComment(cache: Path, version: VersionInfo, mappings: String?, mappingTree: MappingTree, namespace: String) {
+        dumpCommentFromYarnMappingTree(mappingTree, namespace, getCommentJsonFile(cache, version, mappings))
+    }
+
+    fun loadMetadata(cache: Path, version: VersionInfo, mappings: String?) {
+        val metadata = Files.newBufferedReader(getMetadataJsonFile(cache, version, mappings)).use { reader ->
+            return@use Gson().fromJson(reader, MappingMetadata::class.java)
+        }
+        if (metadata.name != provider.name) throw RuntimeException("Unmatched mapping provider name, read ${metadata.name}, should be ${provider.name}")
+        this.setMappingVersion(metadata.version)
+    }
+
+    fun registerComment(cache: Path, version: VersionInfo, mappings: String?) {
+        synchronized(DecompileTaskJavadocCommentFileHolder.files) {
+            DecompileTaskJavadocCommentFileHolder.files[version.id] = getCommentJsonFile(cache, version, null)
+        }
+    }
+
+    fun checkSkipAndLoadIfOk(cache: Path, version: VersionInfo, mappings: String?): Boolean {
+        val canSkip = Files.exists(getCommentJsonFile(cache, version, mappings)) && Files.exists(getMetadataJsonFile(cache, version, mappings))
+        if (canSkip) {
+            // FIXME: relocate this side effect?
+            loadMetadata(cache, version, mappings)
+            registerComment(cache, version, mappings)
+        }
+        return canSkip
     }
 }
 
 class YarnMappingProvider(private val meta: URI, private val maven: URI) : CommonMappingProvider("yarn", GenericTinyReader, "jar") {
-    private fun getMetadataJsonDstFile(cache: Path, version: VersionInfo, mappings: String?): Path = getPath(cache, version, mappings).resolve("mappings-metadata.json")
-    private fun getCommentJsonDstFile(cache: Path, version: VersionInfo, mappings: String?): Path = getPath(cache, version, mappings).resolve("mappings-comments.json")
+    private val helper = AdvancedMappingHelper(this)
     private fun getMappingFileInSrcJar(jar: FileSystem): Path = jar.getPath("mappings/mappings.tiny")
-    private var mappingVersion: String? = null
-    private var allYarnVersions: CompletableFuture<Set<String>?>? = null
-    private val allYarnVersionsLock = Unit
-
-    override fun getVersion(): String {
-        return this.mappingVersion ?: "unknown"
+    private val allYarnVersions: CompletableFuture<Set<String>?> by lazy {
+        requestJson<JsonArray>(meta.resolve("versions/game/yarn")).handle { it, e ->
+            if (e != null) throw e
+            it
+        }.thenApply {
+            if (it == null || it.size() == 0) return@thenApply null
+            val versions = mutableSetOf<String>()
+            it.forEach { item -> versions.add(item.asJsonObject.get("version").asString) }
+            return@thenApply versions
+        }
     }
 
+    override fun getVersion(): String = helper.getMappingVersion()
+
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
-        synchronized(allYarnVersionsLock) {
-            if (allYarnVersions == null) {
-                allYarnVersions = requestJson<JsonArray>(meta.resolve("versions/game/yarn")).handle { it, e ->
-                    if (e != null) throw e
-                    it
-                }.thenApply {
-                    if (it == null || it.size() == 0) return@thenApply null
-                    val versions = mutableSetOf<String>()
-                    it.forEach { item -> versions.add(item.asJsonObject.get("version").asString) }
-                    return@thenApply versions
-                }
-            }
-        }
-        return allYarnVersions!!.thenApply { versions ->
+        return allYarnVersions.thenApply { versions ->
             if (versions == null) return@thenApply null
             return@thenApply versions.contains(version.id)
         }
@@ -181,10 +217,10 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
 
             ym.mt = fixInvertedYarn(ym.mt)
 
-            val commentJsonFile = getCommentJsonDstFile(cache, version, mappings)
-            dumpCommentFromYarnMappingTree(ym.mt, "named", commentJsonFile)
-            writeMappingMetadata(MappingMetadata("yarn", ym.ver), getMetadataJsonDstFile(cache, version, mappings))
-            this.updateMappingInfo(cache, version)
+            helper.setMappingVersion(ym.ver)
+            helper.writeMetadata(cache, version, mappings)
+            helper.writeComment(cache, version, mappings, ym.mt, "named")
+            helper.registerComment(cache, version, null)
 
             CombinedYarnMappingTree(im.mt, ym.mt)
         }
@@ -231,25 +267,131 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
         }
     }
 
-    private fun updateMappingInfo(cache: Path, version: VersionInfo) {
-        synchronized(DecompileTaskJavadocCommentFileHolder.files) {
-            DecompileTaskJavadocCommentFileHolder.files[version.id] = getCommentJsonDstFile(cache, version, null)
-        }
-        this.mappingVersion = readMappingMetadata(getMetadataJsonDstFile(cache, version, null)).version
-    }
-
     override fun canSkipFinishedMappedJar(cache: Path, version: VersionInfo): Boolean {
         // ensure the javadocProviders is created
         // XXX: currently the mappings var is always null
-        val commentJsonFile = getCommentJsonDstFile(cache, version, null)
-        val metadataJsonFile = getMetadataJsonDstFile(cache, version, null)
+        return helper.checkSkipAndLoadIfOk(cache, version, null)
+    }
+}
 
-        val canSkip = Files.exists(commentJsonFile) && Files.exists(metadataJsonFile)
-        if (canSkip) {
-            // FIXME: relocate this side effect?
-            this.updateMappingInfo(cache, version)
+class ParchmentMappingProvider(override val name: String, private val maven: URI) : MojangMappingProvider(name) {
+    private val helper = AdvancedMappingHelper(this)
+    private val allSupportedVersions: CompletableFuture<Set<String>?> by lazy {
+        requestText(maven.resolve("org/parchmentmc/data")).handle { it, e ->
+            if (e != null) null else it
+        }.thenApply {
+            if (it.isNullOrEmpty()) return@thenApply null
+            val versions = mutableSetOf<String>()
+            val pattern = Pattern.compile("""^\s*<a href="parchment-([0-9a-z.-]+)/">parchment-([0-9a-z.-]+)/</a>.*$""")
+            it.lines().forEach { line ->
+                val matcher = pattern.matcher(line)
+                if (matcher.matches()) {
+                    val ver1 = matcher.group(1)
+                    val ver2 = matcher.group(2)
+                    if (ver1 == ver2 && ver1 != null) {
+                        versions.add(ver1)
+                    }
+                }
+            }
+            return@thenApply versions
         }
-        return canSkip
+    }
+
+    override fun getVersion(): String = helper.getMappingVersion()
+
+    override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
+        val allSupportedVersionsFuture = allSupportedVersions
+        return super.supportsVersion(version, target, cache).thenApply { superOk ->
+            if (!superOk) return@thenApply false
+            return@thenApply allSupportedVersionsFuture.get()?.contains(version.id) ?: false
+        }
+    }
+
+    data class ParchmentParameterMapping(val index: Int, val name: String, val descriptor: String, val javadoc: String?)
+    data class ParchmentMethodMapping(val name: String, val descriptor: String, val javadoc: List<String>?, val parameters: List<ParchmentParameterMapping>?)
+    data class ParchmentFieldMapping(val name: String, val descriptor: String, val javadoc: List<String>?)
+    data class ParchmentClassMapping(val name: String, val javadoc: List<String>?, val fields: List<ParchmentFieldMapping>?, val methods: List<ParchmentMethodMapping>?)
+    data class ParchmentMappingJson(val version: String, val classes: List<ParchmentClassMapping>)  // TODO: support package comment
+
+    private fun <T> readFileInZip(zipFilePath: Path, fileName: String, reader: Function<InputStream, T>): T? {
+        FileInputStream(zipFilePath.toFile()).use { fileInputStream ->
+            ZipInputStream(fileInputStream).use { zipInputStream ->
+                var entry = zipInputStream.nextEntry
+                while (entry != null) {
+                    if (entry.name == fileName) {
+                        return reader.apply(zipInputStream)
+                    }
+                    entry = zipInputStream.nextEntry
+                }
+            }
+        }
+        return null
+    }
+
+    override fun postProcessMergedVersion(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path, mappingTree: MappingTree?): CompletableFuture<MappingTree?> {
+        if (mappingTree == null) return CompletableFuture.completedFuture(null)
+
+        val parchmentZipPath = getPath(cache, version, mappings).resolve("parchment-${target.id}.zip")
+        return requestText(maven.resolve("org/parchmentmc/data/parchment-${version.id}/maven-metadata.xml")).handle { it, e ->
+            if (e != null) null else it
+        }.thenApply {
+            if (it.isNullOrEmpty()) return@thenApply null
+            val pattern = Pattern.compile("""^\s*<release>([\d.]+)</release>\s*$""")
+            it.lines().forEach { line ->
+                val matcher = pattern.matcher(line)
+                if (matcher.matches()) {
+                    val ver = matcher.group(1)
+                    helper.setMappingVersion(ver)
+                    return@thenApply ver
+                }
+            }
+            null
+        }.thenCompose { parchmentVersion ->
+            download(maven.resolve("org/parchmentmc/data/parchment-${version.id}/${parchmentVersion}/parchment-${version.id}-${parchmentVersion}.zip"), parchmentZipPath)
+        }.thenApply {
+            readFileInZip(parchmentZipPath, "parchment.json") { stream ->
+                stream.bufferedReader().use {
+                    Gson().fromJson(it, ParchmentMappingJson::class.java)
+                }
+            }
+        }.thenApply {
+            val parchmentMapping = it ?: return@thenApply null
+            val resultMapping = applyParchmentMapping(mappingTree, parchmentMapping)
+
+            helper.writeMetadata(cache, version, mappings)
+            helper.writeComment(cache, version, mappings, resultMapping, resultMapping.namespaces[1])
+            helper.registerComment(cache, version, null)
+
+            resultMapping
+        }
+    }
+
+    private fun applyParchmentMapping(mappingTree: MappingTree, parchmentMapping: ParchmentMappingJson): MappingTree {
+        if (mappingTree.namespaces.size != 2) throw IllegalArgumentException("mojang mapping should have namespace size == 2. Actual namespaces: ${mappingTree.namespaces}")
+        val inverted = mappingTree.invert(1)  // now deobfuscated names become the default names, so we can have index on them
+        val parchmentClassMapping = parchmentMapping.classes.associateBy { it.name }
+        inverted.classes.forEach { cm ->
+            val pcm = parchmentClassMapping[cm.defaultName] ?: return@forEach
+            cm.comment = pcm.javadoc?.joinToString("\n")
+
+            pcm.fields?.forEach forEach2@ { pfm ->
+                val fm = cm.fields[MemberDescriptor(pfm.name, pfm.descriptor)] ?: return@forEach2
+                fm.comment = pfm.javadoc?.joinToString("\n")
+            }
+            pcm.methods?.forEach forEach2@ { pmm ->
+                val mm = cm.methods[MemberDescriptor(pmm.name, pmm.descriptor)] ?: return@forEach2
+                mm.comment = pmm.javadoc?.joinToString("\n")
+                if (mm.parameters.isNotEmpty()) throw IllegalArgumentException("mojang mapping should not contains parameter mappings, found ${mm.parameters}")
+                pmm.parameters?.forEach { ppm ->
+                    mm.parameters[ppm.index] = ParameterImpl(ppm.name, ppm.javadoc)
+                }
+            }
+        }
+        return inverted.invert(1)
+    }
+
+    override fun canSkipFinishedMappedJar(cache: Path, version: VersionInfo): Boolean {
+        return helper.checkSkipAndLoadIfOk(cache, version, null)
     }
 }
 
@@ -269,7 +411,7 @@ fun getMappings(provider: MappingProvider, version: VersionInfo, target: Mapping
                 val c = client.get() ?: return@thenApply null
                 val s = server.get() ?: return@thenApply null
                 c.merge(s)
-            }
+            }.thenCompose { merged -> provider.postProcessMerged(version, MappingTarget.MERGED, cache, merged) }
         }
     }
 }

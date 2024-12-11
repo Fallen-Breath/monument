@@ -7,6 +7,7 @@ import java.io.IOException
 import java.io.InputStreamReader
 import java.net.HttpURLConnection
 import java.net.URI
+import java.nio.charset.Charset
 import java.nio.file.*
 import java.nio.file.attribute.BasicFileAttributes
 import java.security.MessageDigest
@@ -60,6 +61,13 @@ inline fun <reified T : JsonElement> requestJson(url: URI): CompletableFuture<T>
     val conn = url.toURL().openConnection() as HttpURLConnection
     conn.connect()
     GSON.fromJson<T>(InputStreamReader(conn.inputStream))
+}
+
+fun requestText(url: URI, charset: Charset = Charsets.UTF_8): CompletableFuture<String> = supplyAsync(TaskType.DOWNLOAD) {
+    println("Fetching $url")
+    val conn = url.toURL().openConnection() as HttpURLConnection
+    conn.connect()
+    conn.inputStream.bufferedReader(charset).use { reader -> reader.readText() }
 }
 
 fun rmrf(path: Path) {
