@@ -237,8 +237,10 @@ class LocalVariableRenamer {
                 if (varName != className && isValidJavaIdentifier(varName)) {
                     varName
                 } else {
-                    // TODO: FIX "bad varName, desc=Lnet/minecraft/world/level/GameRules$1;, className=1, varName=1"
-                    output("lv-rename", "bad varName, desc=$desc, className=$className, varName=$varName")
+                    if (!isValidJavaIdentifier(varName)) {
+                        // TODO: FIX "bad varName, desc=Lnet/minecraft/world/level/GameRules$1;, className=1, varName=1"
+                        output("lv-rename", "bad varName, desc=$desc, className=$className, varName=$varName")
+                    }
                     null
                 }
             }
