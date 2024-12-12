@@ -51,6 +51,7 @@ private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) ->
                     }
                 }
             } catch (e: IOException) {
+                output("download", "Failed to download $url: $e")
                 throw IOException("Failed to download $url", e)
             }
         }

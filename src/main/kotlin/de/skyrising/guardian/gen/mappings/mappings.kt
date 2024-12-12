@@ -147,7 +147,7 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
         this.setMappingVersion(metadata.version)
     }
 
-    fun registerComment(cache: Path, version: VersionInfo, mappings: String?) {
+    fun registerComment(cache: Path, version: VersionInfo) {
         synchronized(DecompileTaskJavadocCommentFileHolder.files) {
             DecompileTaskJavadocCommentFileHolder.files[version.id] = getCommentJsonFile(cache, version, null)
         }
@@ -158,7 +158,7 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
         if (canSkip) {
             // FIXME: relocate this side effect?
             loadMetadata(cache, version, mappings)
-            registerComment(cache, version, mappings)
+            registerComment(cache, version)
         }
         return canSkip
     }
@@ -189,14 +189,14 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
     }
 
     override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> {
-        return this.getTinyMavenArtifact(cache, version, mappings, target, "yarn").thenApply { artifact -> artifact?.getURL() }
+        return this.getTinyMavenArtifact(version, target, "yarn").thenApply { artifact -> artifact?.getURL() }
     }
 
     override fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path): CompletableFuture<MappingTree?> {
         data class VersionedMappingTree(val ver: String, var mt: MappingTree)
         fun getTinyMapping(what: String) : CompletableFuture<VersionedMappingTree?> {
             val jarFile = getPath(cache, version, mappings).resolve("${what}-${target.id}.jar")
-            return getTinyMavenArtifact(getPath(cache, version, mappings), version, mappings, target, what).thenCompose { artifact ->
+            return getTinyMavenArtifact(version, target, what).thenCompose { artifact ->
                 if (artifact == null) {
                     return@thenCompose CompletableFuture.completedFuture(null)
                 }
@@ -220,7 +220,7 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
             helper.setMappingVersion(ym.ver)
             helper.writeMetadata(cache, version, mappings)
             helper.writeComment(cache, version, mappings, ym.mt, "named")
-            helper.registerComment(cache, version, null)
+            helper.registerComment(cache, version)
 
             CombinedYarnMappingTree(im.mt, ym.mt)
         }
@@ -256,9 +256,10 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
         return mappingTree
     }
 
-    private fun getTinyMavenArtifact(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget, what: String): CompletableFuture<MavenArtifact?> {
+    private fun getTinyMavenArtifact(version: VersionInfo, target: MappingTarget, what: String): CompletableFuture<MavenArtifact?> {
         if (target != MappingTarget.MERGED) return CompletableFuture.completedFuture(null)
         return requestJson<JsonArray>(meta.resolve("versions/${what}/${version.id}")).handle { it, e ->
+            if (e != null) output(version.id, "requestJson for $what ${version.id} failed: $e")
             if (e != null) null else it
         }.thenApply {
             if (it == null || it.size() == 0) return@thenApply null
@@ -333,20 +334,31 @@ class ParchmentMappingProvider(override val name: String, private val maven: URI
 
         val parchmentZipPath = getPath(cache, version, mappings).resolve("parchment-${target.id}.zip")
         return requestText(maven.resolve("org/parchmentmc/data/parchment-${version.id}/maven-metadata.xml")).handle { it, e ->
+            if (e != null) output(version.id, "requestText for parchment maven-metadata.xml failed: $e")
             if (e != null) null else it
         }.thenApply {
             if (it.isNullOrEmpty()) return@thenApply null
-            val pattern = Pattern.compile("""^\s*<release>([\d.]+)</release>\s*$""")
+            val patternRelease = Pattern.compile("""^\s*<release>([\d.]+)</release>\s*$""")
+            val patternLatest = Pattern.compile("""^\s*<latest>([\da-zA-Z.-]+)</latest>\s*$""")
+            var latestVersion: String? = null
             it.lines().forEach { line ->
-                val matcher = pattern.matcher(line)
-                if (matcher.matches()) {
-                    val ver = matcher.group(1)
-                    helper.setMappingVersion(ver)
-                    return@thenApply ver
+                val matcherRelease = patternRelease.matcher(line)
+                if (matcherRelease.matches()) {
+                    return@thenApply matcherRelease.group(1)
+                }
+                val matcherLatest = patternLatest.matcher(line)
+                if (matcherLatest.matches()) {
+                    latestVersion = matcherLatest.group(1)
                 }
             }
-            null
+            if (latestVersion == null) {
+                output(version.id, "locate parchment mapping version for mc ${version.id} failed")
+                output(version.id, it)
+            }
+            latestVersion
         }.thenCompose { parchmentVersion ->
+            if (parchmentVersion == null) return@thenCompose CompletableFuture.completedFuture(null)
+            helper.setMappingVersion(parchmentVersion)
             download(maven.resolve("org/parchmentmc/data/parchment-${version.id}/${parchmentVersion}/parchment-${version.id}-${parchmentVersion}.zip"), parchmentZipPath)
         }.thenApply {
             readFileInZip(parchmentZipPath, "parchment.json") { stream ->
@@ -360,7 +372,7 @@ class ParchmentMappingProvider(override val name: String, private val maven: URI
 
             helper.writeMetadata(cache, version, mappings)
             helper.writeComment(cache, version, mappings, resultMapping, resultMapping.namespaces[1])
-            helper.registerComment(cache, version, null)
+            helper.registerComment(cache, version)
 
             resultMapping
         }
