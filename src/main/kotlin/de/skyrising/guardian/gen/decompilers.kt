@@ -254,25 +254,22 @@ open class VineflowerDecompileTask : DecompileTask {
         Timer(version, "decompile").use {
             val saver = DirectoryResultSaver(srcOutput.toFile())
             val ff = Fernflower(saver, options, object : IFernflowerLogger() {
-                override fun writeMessage(message: String?, severity: Severity?) {
-                    // TODO: make this actually work
-                    if (accepts(severity) && message != null) {
-                        var cls = message.substringAfter("Decompiling class ", "")
-                        var preprocessing = false
-                        if (cls.isEmpty()) {
-                            cls = message.substringAfter("Preprocessing class ", "")
-                            preprocessing = true
-                        }
-                        if (cls.isNotEmpty()) {
-                            listener(cls, preprocessing)
-                        }
+                override fun startReadingClass(className: String?) {
+                    if (className != null) {
+                        listener(className, false)
                     }
                 }
 
-                override fun writeMessage(message: String?, severity: Severity?, t: Throwable?) {
-                    if (accepts(severity)) {
-                        writeMessage(message, severity)
+                override fun startProcessingClass(className: String?) {
+                    if (className != null) {
+                        listener(className, true)
                     }
+                }
+
+                override fun writeMessage(message: String?, severity: Severity?) {
+                }
+
+                override fun writeMessage(message: String?, severity: Severity?, t: Throwable?) {
                 }
             })
 
