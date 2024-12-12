@@ -12,6 +12,7 @@ import java.nio.file.FileSystem
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.ConcurrentHashMap
 import java.util.function.Function
 import java.util.regex.Pattern
 import java.util.zip.ZipInputStream
@@ -21,7 +22,7 @@ val JARS_MAPPED_DIR: Path = JARS_DIR.resolve("mapped")
 interface MappingProvider {
     val name: String
     val format: MappingsParser
-    fun getVersion(): String = "latest"
+    fun getVersion(version: VersionInfo): String = "latest"
     fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path = CACHE_DIR.resolve("mappings")): CompletableFuture<MappingTree?>
     fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path = CACHE_DIR.resolve("mappings")): CompletableFuture<Boolean> {
         return getLatestMappings(version, target, cache).thenApply { it != null }
@@ -121,17 +122,21 @@ data class MappingMetadata(
 )
 
 class AdvancedMappingHelper(private val provider: MappingProvider) {
-    private var mappingVersion: String? = null
+    private val mappingVersions = ConcurrentHashMap<String, String>()  // version.id -> mapping version
 
-    fun getMappingVersion(): String = this.mappingVersion ?: "unknown"
-    fun setMappingVersion(ver: String) { this.mappingVersion = ver }
+    fun getMappingVersion(version: VersionInfo): String {
+        return mappingVersions[version.id] ?: "unknown"
+    }
+    fun setMappingVersion(version: VersionInfo, mappingVersion: String) {
+        mappingVersions[version.id] = mappingVersion
+    }
     fun getMetadataJsonFile(cache: Path, version: VersionInfo, mappings: String?): Path = provider.getPath(cache, version, mappings).resolve("mappings-metadata.json")
     fun getCommentJsonFile(cache: Path, version: VersionInfo, mappings: String?): Path = provider.getPath(cache, version, mappings).resolve("mappings-comments.json")
 
     fun writeMetadata(cache: Path, version: VersionInfo, mappings: String?) {
         Files.newBufferedWriter(getMetadataJsonFile(cache, version, mappings)).use { writer ->
             val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
-            gson.toJson(MappingMetadata(provider.name, getMappingVersion()), writer)
+            gson.toJson(MappingMetadata(provider.name, getMappingVersion(version)), writer)
         }
     }
 
@@ -144,13 +149,11 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
             return@use Gson().fromJson(reader, MappingMetadata::class.java)
         }
         if (metadata.name != provider.name) throw RuntimeException("Unmatched mapping provider name, read ${metadata.name}, should be ${provider.name}")
-        this.setMappingVersion(metadata.version)
+        this.setMappingVersion(version, metadata.version)
     }
 
     fun registerComment(cache: Path, version: VersionInfo) {
-        synchronized(DecompileTaskJavadocCommentFileHolder.files) {
-            DecompileTaskJavadocCommentFileHolder.files[version.id] = getCommentJsonFile(cache, version, null)
-        }
+        DecompileTaskJavadocCommentFileHolder.files[version.id] = getCommentJsonFile(cache, version, null)
     }
 
     fun checkSkipAndLoadIfOk(cache: Path, version: VersionInfo, mappings: String?): Boolean {
@@ -179,7 +182,7 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
         }
     }
 
-    override fun getVersion(): String = helper.getMappingVersion()
+    override fun getVersion(version: VersionInfo): String = helper.getMappingVersion(version)
 
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
         return allYarnVersions.thenApply { versions ->
@@ -217,7 +220,7 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
 
             ym.mt = fixInvertedYarn(ym.mt)
 
-            helper.setMappingVersion(ym.ver)
+            helper.setMappingVersion(version, ym.ver)
             helper.writeMetadata(cache, version, mappings)
             helper.writeComment(cache, version, mappings, ym.mt, "named")
             helper.registerComment(cache, version)
@@ -298,7 +301,7 @@ class ParchmentMappingProvider(override val name: String, private val maven: URI
         }
     }
 
-    override fun getVersion(): String = helper.getMappingVersion()
+    override fun getVersion(version: VersionInfo): String = helper.getMappingVersion(version)
 
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
         val allSupportedVersionsFuture = allSupportedVersions
@@ -358,7 +361,7 @@ class ParchmentMappingProvider(override val name: String, private val maven: URI
             latestVersion
         }.thenCompose { parchmentVersion ->
             if (parchmentVersion == null) return@thenCompose CompletableFuture.completedFuture(null)
-            helper.setMappingVersion(parchmentVersion)
+            helper.setMappingVersion(version, parchmentVersion)
             download(maven.resolve("org/parchmentmc/data/parchment-${version.id}/${parchmentVersion}/parchment-${version.id}-${parchmentVersion}.zip"), parchmentZipPath)
         }.thenApply {
             readFileInZip(parchmentZipPath, "parchment.json") { stream ->

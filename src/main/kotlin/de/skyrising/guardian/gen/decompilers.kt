@@ -220,7 +220,7 @@ open class FernflowerDecompileTask : DecompileTask {
 
 class DecompileTaskJavadocCommentFileHolder {
     companion object {
-        val files = mutableMapOf<String, Path>()  // version -> path to the comments.json
+        val files = ConcurrentHashMap<String, Path>()  // version -> path to the comments.json
     }
 }
 
@@ -231,10 +231,7 @@ open class VineflowerDecompileTask : DecompileTask {
         val clsOutput = outDir.resolve("bin")
         val srcOutput = outDir.resolve("src")
 
-        val javadocCommentFile: Path?
-        synchronized(DecompileTaskJavadocCommentFileHolder.files) {
-            javadocCommentFile = DecompileTaskJavadocCommentFileHolder.files[version]
-        }
+        val javadocCommentFile = DecompileTaskJavadocCommentFileHolder.files[version]
 
         val executor = threadLocalContext.get().executor as CustomThreadPoolExecutor
         val maxTotalThreads = maxOf(executor.parallelism - 4, 1)
@@ -254,14 +251,17 @@ open class VineflowerDecompileTask : DecompileTask {
         Timer(version, "decompile").use {
             val saver = DirectoryResultSaver(srcOutput.toFile())
             val ff = Fernflower(saver, options, object : IFernflowerLogger() {
+                // see org.jetbrains.java.decompiler.main.decompiler.PrintStreamLogger
                 override fun startReadingClass(className: String?) {
                     if (className != null) {
+                        output(version, "Decompiling class $className")
                         listener(className, false)
                     }
                 }
 
                 override fun startProcessingClass(className: String?) {
                     if (className != null) {
+                        output(version, "Preprocessing class $className")
                         listener(className, true)
                     }
                 }
@@ -283,6 +283,7 @@ open class VineflowerDecompileTask : DecompileTask {
             } finally {
                 ff.clearContext()
             }
+            output(version, "Decompilation completed")
         }
         return srcOutput
     }
