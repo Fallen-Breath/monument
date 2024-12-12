@@ -103,12 +103,13 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
                 val classNames = superClasses.keys
                 for (supers in superClasses.values) supers.retainAll(classNames)
                 val remapper = AsmRemapper(subMappings, superClasses, namespace)
+                val revertedSubMappings = subMappings.invert(namespace)
                 for ((className, classNode) in classNodes) {
+                    val remappedName = remapper.map(className) ?: className
                     val remappedNode = ClassNode()
                     classNode.accept(ClassRemapper(remappedNode, remapper))
                     fixBridgeMethods(remappedNode)
-                    renameLocalVariables(remappedNode, subMappings.classes[className])
-                    val remappedName = remapper.map(className) ?: className
+                    renameLocalVariables(remappedNode, revertedSubMappings.classes[remappedName])
                     remappedNodes[remappedName] = remappedNode
                 }
             }
@@ -168,8 +169,8 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
 }
 
 class LocalVariableRenamer {
-    private val names = HashSet<String>()
-    private val nameCounts = HashMap<String, Int>()
+    private val names = mutableSetOf<String>()
+    private val nameCounts = mutableMapOf<String, Int>()
     private val defaultLvNamePattern = Pattern.compile("^lvt\\d+$")
 
     fun process(methodNode: MethodNode, methodMapping: MethodMapping?) {
@@ -185,7 +186,7 @@ class LocalVariableRenamer {
             }
             val paramName = methodMapping?.parameters?.get(lv.index)?.name
             var needsRename = false
-            if (paramName != null) {
+            if (!paramName.isNullOrEmpty()) {
                 lv.name = paramName
             } else if (defaultLvNamePattern.matcher(lv.name).matches()) {
                 toRename.add(lv)
@@ -319,14 +320,10 @@ class LocalVariableRenamer {
     }
 }
 
-fun renameLocalVariables(remappedNode: ClassNode, classMapping: ClassMapping?) {
-    val rmm = mutableMapOf<MemberDescriptor, MethodMapping>()
-    classMapping?.methods?.keys?.forEach { key ->
-        val mm = classMapping.methods[key]!!
-        rmm[MemberDescriptor(mm[1], key.type)] = mm
-    }
+fun renameLocalVariables(remappedNode: ClassNode, reversedClassMapping: ClassMapping?) {
     for (methodNode in remappedNode.methods) {
-        LocalVariableRenamer().process(methodNode, rmm[MemberDescriptor(methodNode.name, methodNode.desc)])
+        val methodMapping = reversedClassMapping?.methods?.get(MemberDescriptor(methodNode.name, methodNode.desc))
+        LocalVariableRenamer().process(methodNode, methodMapping)
     }
 }
 
