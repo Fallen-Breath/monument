@@ -89,9 +89,8 @@ fun mapJar(version: String, input: Path, mappings: MappingTree, provider: String
 
 fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, namespace: Int = mappings.namespaces.size - 1) = supplyAsync(TaskType.REMAP) {
     getJarFileSystem(input).use { inFs ->
-        fun remapOnce(classNodes: Map<String, ClassNode>, subMappings: MappingTree, idx: Int): Map<String, ClassNode> {
+        fun createSuperClassesMapping(classNodes: Map<String, ClassNode>): Map<String, MutableSet<String>> {
             val superClasses = mutableMapOf<String, MutableSet<String>>()
-            val remappedNodes = linkedMapOf<String, ClassNode>()
             classNodes.entries.forEach { (className, classNode) ->
                 val supers = linkedSetOf<String>()
                 val superName = classNode.superName
@@ -99,19 +98,31 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
                 supers.addAll(classNode.interfaces)
                 superClasses[className] = supers
             }
+            return superClasses
+        }
+        fun remapOnce(classNodes: Map<String, ClassNode>, subMappings: MappingTree, idx: Int, renameLocalVar: Boolean): Map<String, ClassNode> {
+            val superClasses = createSuperClassesMapping(classNodes)
+            val remappedNodes = linkedMapOf<String, ClassNode>()
             Timer(version, "remapJar${idx}").use {
                 val classNames = superClasses.keys
                 for (supers in superClasses.values) supers.retainAll(classNames)
                 val remapper = AsmRemapper(subMappings, superClasses, namespace)
-                val revertedSubMappings = subMappings.invert(namespace)
                 for ((className, classNode) in classNodes) {
                     val remappedName = remapper.map(className) ?: className
                     val remappedNode = ClassNode()
                     classNode.accept(ClassRemapper(remappedNode, remapper))
                     fixBridgeMethods(remappedNode)
-                    renameLocalVariables(remappedNode, revertedSubMappings.classes[remappedName])
                     remappedNodes[remappedName] = remappedNode
                 }
+
+                if (renameLocalVar) {
+                    val revertedSubMappings = subMappings.invert(namespace)
+                    val remappedSuperClasses = createSuperClassesMapping(remappedNodes)
+                    for ((remappedName, remappedNode) in remappedNodes) {
+                        renameLocalVariables(remappedNode, revertedSubMappings.classes[remappedName], remappedSuperClasses)
+                    }
+                }
+
             }
             return remappedNodes
         }
@@ -147,7 +158,7 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
                 mappingTreeSequence.add(mappings)
             }
             mappingTreeSequence.forEachIndexed { i, sm ->
-                classNodes = remapOnce(classNodes, sm, i)
+                classNodes = remapOnce(classNodes, sm, i, i == mappingTreeSequence.size - 1)
             }
 
             for ((className, classNode) in classNodes) {
@@ -168,7 +179,7 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
     }
 }
 
-class LocalVariableRenamer {
+class LocalVariableRenamer(val superclasses: Map<String, MutableSet<String>>) {
     private val names = mutableSetOf<String>()
     private val nameCounts = mutableMapOf<String, Int>()
     private val defaultLvNamePattern = Pattern.compile("^lvt\\d+$")
@@ -223,27 +234,58 @@ class LocalVariableRenamer {
             }
 
             'L' -> run branch@{
-                incrementLetter = false
-                var className = type.substring(minOf(0, type.length))  // remove the 'L' prefix
-                className = className.substringAfterLast('/')
-                className = className.substringAfterLast('$')
-                className = className.substring(0, maxOf(className.length - 1, 0))  // remove the ';' suffix
+                fun tryMakeNameForClassName0(clazz: String): Pair<String?, String> {
+                    var className = clazz
+                    className = className.substringAfterLast('/')
+                    className = className.substringAfterLast('$')
 
-                if (className.isEmpty()) {
-                    output("lv-rename", "bad className, desc=$desc, className=$className")
-                    return@branch null
-                }
-
-                val varName = className[0].lowercaseChar() + className.substring(1)
-                if (varName != className && isValidJavaIdentifier(varName)) {
-                    varName
-                } else {
-                    if (!isValidJavaIdentifier(varName)) {
-                        // TODO: FIX "bad varName, desc=Lnet/minecraft/world/level/GameRules$1;, className=1, varName=1"
-                        output("lv-rename", "bad varName, desc=$desc, className=$className, varName=$varName")
+                    if (className.isEmpty()) {
+                        return Pair(null, "bad className, desc=$desc, className=$className")
                     }
-                    null
+
+                    val varName = className[0].lowercaseChar() + className.substring(1)
+                    return if (!isValidJavaIdentifier(varName)) {
+                        val nameWithoutLeadingDigit = className.dropWhile { it.isDigit() }
+                        if (nameWithoutLeadingDigit.isNotEmpty() && nameWithoutLeadingDigit != className) {
+                            // Anonymous classes in member functions, e.g. "net/minecraft/network/chat/Style$1Collector" in mc1.21.4 mojmap
+                            tryMakeNameForClassName0(nameWithoutLeadingDigit)
+                        } else {
+                            Pair(null, "bad varName, desc=$desc, className=$className, varName=$varName")
+                        }
+                    } else if (varName == className) {
+                        Pair(null, "unchanged")
+                    } else {
+                        Pair(varName, "")
+                    }
                 }
+
+                val superErrors = mutableListOf<String>()
+                fun tryMakeNameForClassName(clazz: String): Pair<String?, String> {
+                    val (varName, err) = tryMakeNameForClassName0(clazz)
+                    if (varName == null) {
+                        val supers = superclasses[clazz]?.toList() ?: listOf()
+                        supers.forEach { superClazz ->
+                            if (superClazz == "java/lang/Object") return@forEach
+                            val (superVarName, superErr) = tryMakeNameForClassName(superClazz)
+                            if (superVarName != null) {
+                                return Pair(superVarName, "")
+                            } else {
+                                superErrors.add("super $superClazz $superErr")
+                            }
+                        }
+                    }
+                    return Pair(varName, err)
+                }
+
+                incrementLetter = false
+                val currentClassName = type.substring(minOf(1, type.length)).removeSuffix(";")  // remove the 'L' prefix and the ';' suffix
+                val (varName, err) = tryMakeNameForClassName(currentClassName)
+                if (varName != null) return@branch varName
+
+                if (err != "unchanged") {
+                    output("lv-rename", "rename class var failed: $err, super: $superErrors")
+                }
+                null
             }
             else -> {
                 output("lv-rename", "bad type, type=$type")
@@ -320,10 +362,10 @@ class LocalVariableRenamer {
     }
 }
 
-fun renameLocalVariables(remappedNode: ClassNode, reversedClassMapping: ClassMapping?) {
+fun renameLocalVariables(remappedNode: ClassNode, reversedClassMapping: ClassMapping?, superclasses: Map<String, MutableSet<String>>) {
     for (methodNode in remappedNode.methods) {
         val methodMapping = reversedClassMapping?.methods?.get(MemberDescriptor(methodNode.name, methodNode.desc))
-        LocalVariableRenamer().process(methodNode, methodMapping)
+        LocalVariableRenamer(superclasses).process(methodNode, methodMapping)
     }
 }
 
