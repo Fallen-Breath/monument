@@ -17,10 +17,10 @@ import java.util.zip.ZipFile
 
 data class DownloadProgress(val length: Long, val progress: Long)
 
-private val DOWNLOADS = ConcurrentHashMap<URI, CompletableFuture<Unit>>()
+private val DOWNLOADS = ConcurrentHashMap<Pair<URI, Path>, CompletableFuture<Unit>>()
 
-fun download(url: URI, file: Path, listener: ((DownloadProgress) -> Unit)? = null) = DOWNLOADS.computeIfAbsent(url) {
-    startDownload(it, file, listener)
+fun download(url: URI, file: Path, listener: ((DownloadProgress) -> Unit)? = null) = DOWNLOADS.computeIfAbsent(Pair(url, file)) {
+    startDownload(url, file, listener)
 }
 
 private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) -> Unit)? = null) =
