@@ -77,12 +77,31 @@ fun <T: DagNode<T>> createCommits(subGraph: Collection<T>, creator: (T, List<Com
     val map = mutableMapOf<T, CommitTemplate>()
     val commits = mutableListOf<CommitTemplate>()
     for (node in subGraph) {
-        val parents = findParentsWithSkips(node, map)
+        val parents = trimParents(findParentsWithSkips(node, map))
         val commit = creator(node, parents)
         map[node] = commit
         commits.add(commit)
     }
     return commits
+}
+
+private fun trimParents(parents: List<CommitTemplate>): List<CommitTemplate> {
+    // trim this useless case, where the relation of "1.16.4 --> 1.17" is useless
+    //   1.16.3 --> 1.16.4 --> 1.16.5 --> 1.17
+    //                 \-------------------^
+    return parents.filter { parent ->
+        parents.forEach { otherParent ->
+            if (parent == otherParent) return@forEach
+            var p = otherParent
+            for (i in 1..10) {  // a 5-depth lookback, should be really enough for MC
+                if (p.parents.size != 1) break  // trace chain only
+                val pp = p.parents[0]
+                if (pp == parent) return@filter false
+                p = pp
+            }
+        }
+        true
+    }
 }
 
 fun <T: DagNode<T>, S> findParentsWithSkips(node: T, map: Map<T, S>): List<S> {
