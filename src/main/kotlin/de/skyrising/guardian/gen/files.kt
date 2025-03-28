@@ -23,6 +23,24 @@ fun download(url: URI, file: Path, listener: ((DownloadProgress) -> Unit)? = nul
     startDownload(url, file, listener)
 }
 
+private const val MAX_REQUEST_ATTEMPTS = 5
+
+fun <T> requestUrl(url: URI, func: ((HttpURLConnection) -> T)): T {
+    var lastException = IOException()
+    for (attempt in 1..MAX_REQUEST_ATTEMPTS) {
+        val conn = url.toURL().openConnection() as HttpURLConnection
+        conn.connect()
+        try {
+            return func(conn)
+        } catch (e: IOException) {
+            output("request", "Failed to request $url, attempt $attempt: $e")
+            lastException = e
+            Thread.sleep(500)
+        }
+    }
+    throw IOException("Failed to download $url after $MAX_REQUEST_ATTEMPTS attempts", lastException)
+}
+
 private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) -> Unit)? = null) =
     supplyAsync(TaskType.DOWNLOAD) {
         Timer("", file.toString(), mapOf("url" to url.toString(), "file" to file.toString())).use {
@@ -33,9 +51,8 @@ private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) ->
                 Files.copy(Paths.get(url), file)
                 return@supplyAsync
             }
-            try {
-                val conn = url.toURL().openConnection() as HttpURLConnection
-                conn.connect()
+
+            requestUrl(url) { conn ->
                 val len = conn.getHeaderFieldLong("Content-Length", -1)
                 BufferedInputStream(conn.inputStream).use { input ->
                     Files.newOutputStream(file).use { output ->
@@ -50,25 +67,22 @@ private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) ->
                         }
                     }
                 }
-            } catch (e: IOException) {
-                output("download", "Failed to download $url: $e")
-                throw IOException("Failed to download $url", e)
             }
         }
     }
 
 inline fun <reified T : JsonElement> requestJson(url: URI): CompletableFuture<T> = supplyAsync(TaskType.DOWNLOAD) {
     println("Fetching $url")
-    val conn = url.toURL().openConnection() as HttpURLConnection
-    conn.connect()
-    GSON.fromJson<T>(InputStreamReader(conn.inputStream))
+    requestUrl(url) { conn ->
+        GSON.fromJson<T>(InputStreamReader(conn.inputStream))
+    }
 }
 
 fun requestText(url: URI, charset: Charset = Charsets.UTF_8): CompletableFuture<String> = supplyAsync(TaskType.DOWNLOAD) {
     println("Fetching $url")
-    val conn = url.toURL().openConnection() as HttpURLConnection
-    conn.connect()
-    conn.inputStream.bufferedReader(charset).use { reader -> reader.readText() }
+    requestUrl(url) { conn ->
+        conn.inputStream.bufferedReader(charset).use { reader -> reader.readText() }
+    }
 }
 
 fun rmrf(path: Path) {
