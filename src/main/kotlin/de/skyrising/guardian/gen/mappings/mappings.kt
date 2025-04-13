@@ -50,7 +50,8 @@ interface MappingProvider {
         val FABRIC_INTERMEDIARY = IntermediaryMappingProvider("fabric", URI("https://meta.fabricmc.net/v2/"), URI("https://maven.fabricmc.net/"))
         val LEGACY_INTERMEDIARY = IntermediaryMappingProvider("legacy", URI("https://meta.legacyfabric.net/v2/"), URI("https://maven.legacyfabric.net/"))
         val QUILT_INTERMEDIARY = IntermediaryMappingProvider("quilt", URI("https://meta.quiltmc.org/v3/"), URI("https://maven.quiltmc.org/repository/release/"))
-        val YARN = YarnMappingProvider(URI("https://meta.fabricmc.net/v2/"), URI("https://maven.fabricmc.net/"))
+        val YARN = YarnMappingProvider("yarn", URI("https://meta.fabricmc.net/v2/"), URI("https://maven.fabricmc.net/"))
+        val LEGACY_YARN = YarnMappingProvider("legacy-yarn", URI("https://meta.legacyfabric.net/v2/"), URI("https://maven.legacyfabric.net/"))
         val PARCHMENT = ParchmentMappingProvider("parchment", URI("https://maven.parchmentmc.org/"))
     }
 }
@@ -167,7 +168,7 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
     }
 }
 
-class YarnMappingProvider(private val meta: URI, private val maven: URI) : CommonMappingProvider("yarn", GenericTinyReader, "jar") {
+class YarnMappingProvider(override val name: String, private val meta: URI, private val maven: URI) : CommonMappingProvider(name, GenericTinyReader, "jar") {
     private val helper = AdvancedMappingHelper(this)
     private fun getMappingFileInSrcJar(jar: FileSystem): Path = jar.getPath("mappings/mappings.tiny")
     private val allYarnVersions: CompletableFuture<Set<String>?> by lazy {
@@ -186,7 +187,9 @@ class YarnMappingProvider(private val meta: URI, private val maven: URI) : Commo
 
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
         return allYarnVersions.thenApply { versions ->
-            if (versions == null) return@thenApply null
+            if (versions == null) {
+                throw RuntimeException("allYarnVersions is null")
+            }
             return@thenApply versions.contains(version.id)
         }
     }
