@@ -220,7 +220,8 @@ fun generateGradleBuild(manifest: JsonObject, dir: Path) {
         val libs = manifest["libraries"]!!.asJsonArray
         val byCondition = mutableMapOf<String, MutableSet<Dependency>>()
         byCondition[""] = mutableSetOf(
-            Dependency("com.google.code.findbugs:jsr305:3.0.1", "compileOnly")
+            Dependency("com.google.code.findbugs:jsr305:3.0.1", "compileOnly"),
+            Dependency("org.jetbrains:annotations:26.0.2", "compileOnly"),
         )
         for (lib in libs) {
             // TODO: natives? Just getting the java parts is enough to fix syntax highlighting
