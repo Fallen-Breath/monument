@@ -33,7 +33,6 @@ fun downloadAssets(version: VersionInfo): CompletableFuture<DownloadAssetsResult
         if (lastManifest != bestManifest) {
             output("assets", "version ${version.id} lastManifest (${lastManifest}) != bestManifest (${bestManifest})")
         }
-        output("assets", "version ${version.id} bestManifest: $bestManifest")
         val assetIndexId = bestManifest.assetIndex
         val assetIndexSha1 = bestManifest.assetHash
 
@@ -73,6 +72,7 @@ fun downloadAssets(version: VersionInfo): CompletableFuture<DownloadAssetsResult
             }
             CompletableFuture.allOf(*futures.toTypedArray()).thenApply { futures.map { it.join() } }
         }.thenApply { items ->
+            if (items == null) return@thenApply null
             output("assets", "version ${version.id} assets download done")
             DownloadAssetsResult(assetIndexUrl, items)
         }
