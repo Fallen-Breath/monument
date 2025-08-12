@@ -52,10 +52,12 @@ private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) ->
                 return@supplyAsync
             }
 
+            val tmpFile = file.resolveSibling(file.fileName.toString() + ".tmp")
+
             requestUrl(url) { conn ->
                 val len = conn.getHeaderFieldLong("Content-Length", -1)
                 BufferedInputStream(conn.inputStream).use { input ->
-                    Files.newOutputStream(file).use { output ->
+                    Files.newOutputStream(tmpFile).use { output ->
                         val buf = ByteArray(4096)
                         var progress = 0L
                         while (true) {
@@ -68,6 +70,9 @@ private fun startDownload(url: URI, file: Path, listener: ((DownloadProgress) ->
                     }
                 }
             }
+
+            Files.move(tmpFile, file, StandardCopyOption.REPLACE_EXISTING)
+            Unit
         }
     }
 
