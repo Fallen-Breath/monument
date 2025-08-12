@@ -87,10 +87,12 @@ abstract class JarMappingProvider(override val name: String, override val format
         val jarFile = getPath(cache, version, mappings).resolve("mappings-${target.id}.jar")
         return getUrl(getPath(cache, version, mappings), version, mappings, target).thenCompose { url ->
             if (url == null) CompletableFuture.completedFuture(Unit) else download(url, jarFile)
-        }.thenApplyAsync {
-            if (!Files.exists(jarFile)) return@thenApplyAsync null
-            getJarFileSystem(jarFile).use { fs ->
-                Files.newBufferedReader(getFile(version, mappings, target, fs)).use(format::parse)
+        }.thenCompose {
+            if (!Files.exists(jarFile)) return@thenCompose null
+            supplyAsync(TaskType.READ_MAPPINGS) {
+                getJarFileSystem(jarFile).use { fs ->
+                    Files.newBufferedReader(getFile(version, mappings, target, fs)).use(format::parse)
+                }
             }
         }
     }
@@ -206,12 +208,14 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
                 if (artifact == null) {
                     return@thenCompose CompletableFuture.completedFuture(null)
                 }
-                download(artifact.getURL(), jarFile).thenApply {
-                    if (!Files.exists(jarFile)) return@thenApply null
-                    val mappingTree = getJarFileSystem(jarFile).use { fs ->
-                        Files.newBufferedReader(getMappingFileInSrcJar(fs)).use(format::parse)
+                download(artifact.getURL(), jarFile).thenCompose {
+                    if (!Files.exists(jarFile)) return@thenCompose null
+                    supplyAsync(TaskType.READ_MAPPINGS) {
+                        val mappingTree = getJarFileSystem(jarFile).use { fs ->
+                            Files.newBufferedReader(getMappingFileInSrcJar(fs)).use(format::parse)
+                        }
+                        VersionedMappingTree(artifact.artifact.version, mappingTree)
                     }
-                    VersionedMappingTree(artifact.artifact.version, mappingTree)
                 }
             }
         }
