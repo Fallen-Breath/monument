@@ -58,6 +58,7 @@ val SOURCES_DIR: Path = OUTPUT_DIR.resolve("sources")
 val CACHE_DIR: Path = Path.of(System.getenv("MONUMENT_CACHE") ?: ".cache")
 val RESOURCE_CACHE_DIR: Path = CACHE_DIR.resolve("resources")
 val JARS_DIR: Path = CACHE_DIR.resolve("jars")
+val ASSETS_DIR: Path = CACHE_DIR.resolve("assets")
 
 private val UNICODE_PROGRESS_BLOCKS = charArrayOf(' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█')
 
@@ -372,27 +373,29 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
         "Monument version: $MONUMENT_VERSION",
         "Decompiler: $decompilerArtifact",
     ))
-    val jarFuture = unit(getMappedMergedJar(version, provider)).thenApply {
-        // Not the provider finishes inited, so we can output some information about it
-        Files.write(out.resolve("README.md"), listOf(
-            "# Minecraft", "",
-            "- Minecraft version: `${version.id}`",
-            "- Mapping type: `${provider.name}`",
-            "- Mapping version: `${provider.getVersion(version)}`",
-            "- Decompiler: `${decompilerArtifact}`",
-            "",
-            "**DO NOT REDISTRIBUTE**"
-        ))
-        it
-    }
+    val jarFuture = unit(getMappedMergedJar(version, provider))
     val libsFuture = unit(downloadLibraries(version))
-    return CompletableFuture.allOf(jarFuture, libsFuture).thenCompose {
+    val assetsFuture = unit(downloadAssets(version))
+    return CompletableFuture.allOf(jarFuture, libsFuture, assetsFuture).thenCompose {
         val extractResources = unit(getJar(version, MappingTarget.CLIENT)).thenCompose { jar ->
             if (Files.exists(resOut)) rmrf(resOut)
             unit(extractResources(version.id, jar, resOut, postProcessors))
         }
         val jar = jarFuture.get()
         val libs = libsFuture.get()
+        val assets = assetsFuture.get()
+
+        Files.write(out.resolve("README.md"), listOf(
+            "# Minecraft", "",
+            "- Minecraft version: `${version.id}`",
+            "- Asset index: `${assets?.indexUrl ?: "N/A"}`",
+            "- Mapping type: `${provider.name}`",
+            "- Mapping version: `${provider.getVersion(version)}`",
+            "- Decompiler: `${decompilerArtifact}`",
+            "",
+            "**DO NOT REDISTRIBUTE**"
+        ))
+
         output(version.id, "Decompiling with ${decompiler.name}")
         val artifacts = decompilerMap[decompiler]!!
         val outputDir: (Boolean) -> Path = {
@@ -422,6 +425,9 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
         val classesUnit = unit.subUnit(classes.size)
         for (lib in libs) {
             OPENED_LIBRARIES.computeIfAbsent(lib, ::getJarFileSystem)
+        }
+        if (assets != null) {
+            copyAssets(assets, resOut.resolve("assets"))
         }
         val decompile = decompiler.decompile(artifacts, version.id, jar, outputDir, libs) { className, addExtra ->
             if (className.replace('.', '/') in classes) {

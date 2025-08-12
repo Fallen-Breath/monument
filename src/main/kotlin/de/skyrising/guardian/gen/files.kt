@@ -313,6 +313,14 @@ fun extractResources(version: String, jar: Path, out: Path, postProcessors: List
         }
     }
 
+fun copyAssets(assets: DownloadAssetsResult, out: Path) {
+    for (asset in assets.assets) {
+        val dst = out.resolve(asset.assetPath)
+        Files.createDirectories(dst.parent)
+        Files.createLink(dst, Path.of(asset.downloadPath))
+    }
+}
+
 fun convertStructure(tag: Tag) {
     if (tag !is CompoundTag) return
     tag.remove("DataVersion")
