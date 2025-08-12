@@ -18,6 +18,8 @@ import java.text.SimpleDateFormat
 import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.AtomicInteger
 import kotlin.system.exitProcess
 
 val INITIAL_MAX_THREADS = maxOf(Runtime.getRuntime().availableProcessors(), 1)
@@ -171,6 +173,32 @@ fun readConfig(): Config {
     return GSON.fromJson(json)
 }
 
+class AsyncSemaphore(permits: Int) {
+    private val available = AtomicInteger(permits)
+    private val waitQueue = ConcurrentLinkedQueue<CompletableFuture<Void>>()
+
+    fun acquireAsync(): CompletableFuture<Void> {
+        val future = CompletableFuture<Void>()
+        if (available.decrementAndGet() >= 0) {
+            future.complete(null)
+        } else {
+            waitQueue.add(future)
+        }
+        return future
+    }
+
+    fun release() {
+        if (available.incrementAndGet() <= 0) {
+            val next = waitQueue.poll()
+            next?.complete(null)
+        }
+    }
+
+    fun <T> withAsync(func: () -> CompletableFuture<T>): CompletableFuture<T> {
+        return acquireAsync().thenCompose { func() }.whenComplete { _, _ -> release() }
+    }
+}
+
 fun update(branch: String, action: String, recommitFrom: String?, manifest: Path?) {
     val startTime = System.currentTimeMillis()
     val check = action == "check"
@@ -243,10 +271,12 @@ fun update(branch: String, action: String, recommitFrom: String?, manifest: Path
         val executor = threadLocalContext.get().executor as CustomThreadPoolExecutor
         executor.decompileParallelism = minOf(executor.decompileParallelism, missing.size)
         val progressUnits = mutableListOf<ProgressUnit>()
+        // limit maximum concurrency, or tons of mapping variables within ongoing futures will eat all memory
+        val remapJarSem = AsyncSemaphore(maxOf(executor.decompileParallelism, 2))
         for (version in missing) {
             val unit = ProgressUnit(2, 0)
             progressUnits.add(unit)
-            futures.add(genSources(unit, version, mappings, decompiler, decompilerMap, postProcessors).thenRun {
+            futures.add(genSources(unit, version, mappings, remapJarSem, decompiler, decompilerMap, postProcessors).thenRun {
                 unit.done = unit.tasks
             })
         }
@@ -346,20 +376,22 @@ fun spellVersions(count: Int) = if (count == 1) "$count version" else "$count ve
 
 fun getSourcePath(version: String, mappings: MappingProvider, decompiler: Decompiler): Path = SOURCES_DIR.resolve(mappings.name).resolve(decompiler.name).resolve(version)
 
-fun getMappedMergedJar(version: VersionInfo, provider: MappingProvider): CompletableFuture<Path> {
+fun getMappedMergedJar(version: VersionInfo, provider: MappingProvider, remapJarSem: AsyncSemaphore): CompletableFuture<Path> {
     if (provider.canSkipFinishedMappedJar(MAPPINGS_CACHE_DIR, version)) {
         val mappedJarPath = getMappedJarOutput(provider.name, JARS_MERGED_DIR.resolve("${version.id}.jar"))
         if (Files.exists(mappedJarPath) && isJarGood(mappedJarPath, 10240)) return CompletableFuture.completedFuture(mappedJarPath)
     }
     val jar = getJar(version, MappingTarget.MERGED)
-    val mappings = getMappings(provider, version, MappingTarget.MERGED)
-    return CompletableFuture.allOf(jar, mappings).thenCompose {
-        val m = mappings.get() ?: throw IllegalStateException("No mappings")
-        return@thenCompose mapJar(version.id, jar.get(), m, provider.name)
+    return remapJarSem.withAsync {
+        val mappings = getMappings(provider, version, MappingTarget.MERGED)
+        CompletableFuture.allOf(jar, mappings).thenCompose {
+            val m = mappings.get() ?: throw IllegalStateException("No mappings")
+            return@thenCompose mapJar(version.id, jar.get(), m, provider.name)
+        }
     }
 }
 
-fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvider, decompiler: Decompiler, decompilerMap: Map<Decompiler, List<MavenArtifact>>, postProcessors: List<PostProcessor>): CompletableFuture<Path> {
+fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvider, remapJarSem: AsyncSemaphore, decompiler: Decompiler, decompilerMap: Map<Decompiler, List<MavenArtifact>>, postProcessors: List<PostProcessor>): CompletableFuture<Path> {
     val out = SOURCES_DIR.resolve(provider.name).resolve(decompiler.name).resolve(version.id)
     unit.done++
     if (Files.exists(out)) rmrf(out)
@@ -373,7 +405,7 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
         "Monument version: $MONUMENT_VERSION",
         "Decompiler: $decompilerArtifact",
     ))
-    val jarFuture = unit(getMappedMergedJar(version, provider))
+    val jarFuture = unit(getMappedMergedJar(version, provider, remapJarSem))
     val libsFuture = unit(downloadLibraries(version))
     val assetsFuture = unit(downloadAssets(version))
     return CompletableFuture.allOf(jarFuture, libsFuture, assetsFuture).thenCompose {
