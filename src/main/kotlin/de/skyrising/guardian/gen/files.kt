@@ -1,5 +1,6 @@
 package de.skyrising.guardian.gen
 
+import com.google.gson.GsonBuilder
 import com.google.gson.JsonElement
 import java.io.BufferedInputStream
 import java.io.File
@@ -244,6 +245,19 @@ val SOURCE_PROCESSOR = object : PostProcessor {
     }
 }
 
+val LANG_FILE_PROCESSOR = object : PostProcessor {
+    private val langPath = Paths.get("assets", "minecraft", "lang")
+
+    override fun matches(path: Path): Boolean = path.parent == langPath && path.fileName.toString().endsWith(".json")
+
+    override fun process(path: Path, content: ByteArray): Pair<Path, ByteArray> {
+        val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
+        val langMap = gson.fromJson(String(content, Charsets.UTF_8), LinkedHashMap<String, String>()::class.java)
+            ?: throw RuntimeException("Could not parse $path as json")
+        return Pair(path, gson.toJson(langMap).toByteArray(Charsets.UTF_8))
+    }
+}
+
 fun postProcessFile(path: Path, relative: Path, postProcessors: List<PostProcessor>): Pair<Path, ByteArray?> {
     var outRelative = relative
     var content: ByteArray? = null
@@ -313,11 +327,17 @@ fun extractResources(version: String, jar: Path, out: Path, postProcessors: List
         }
     }
 
-fun copyAssets(assets: DownloadAssetsResult, out: Path) {
+fun copyAssets(assets: DownloadAssetsResult, resOut: Path, postProcessors: List<PostProcessor>) {
     for (asset in assets.assets) {
-        val dst = out.resolve(asset.assetPath)
+        val src = Path.of(asset.downloadPath)
+        val (outRelative, content) = postProcessFile(src, Paths.get("assets", asset.assetPath), postProcessors)
+        val dst = resOut.resolve(outRelative)
         Files.createDirectories(dst.parent)
-        Files.createLink(dst, Path.of(asset.downloadPath))
+        if (content == null) {
+            copyCached(src, dst, RESOURCE_CACHE_DIR)
+        } else {
+            writeCached(dst, content, RESOURCE_CACHE_DIR)
+        }
     }
 }
 

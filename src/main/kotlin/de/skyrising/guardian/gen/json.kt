@@ -112,6 +112,8 @@ val GSON: Gson = GsonBuilder()
         if (processStructures) postProcessors.add(STRUCTURE_PROCESSOR)
         val processSources = obj["processSources", context] ?: true
         if (processSources) postProcessors.add(SOURCE_PROCESSOR)
+        val processLangFiles = obj["processLangFiles", context] ?: true
+        if (processLangFiles) postProcessors.add(LANG_FILE_PROCESSOR)
         SourceConfig(mappings, decompiler, postProcessors)
     }
     .registerTypeAdapter<JsonObject, VersionInfo> { obj, _, context ->

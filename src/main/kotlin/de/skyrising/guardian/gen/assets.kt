@@ -58,7 +58,7 @@ fun downloadAssets(version: VersionInfo, unit: ProgressUnit): CompletableFuture<
                     wantedAssets.add(WantedAsset(path, assetUrl, item.hash))
                 }
             }
-            output("assets", "version ${version.id} download: ${wantedAssets.size} assets start")
+            output(version.id, "Assets downloading start (size=${wantedAssets.size})")
 
             val assetUnit = unit.subUnit(wantedAssets.size)
             val futures = mutableListOf<CompletableFuture<DownloadAssetsResultItem>>()
@@ -78,7 +78,7 @@ fun downloadAssets(version: VersionInfo, unit: ProgressUnit): CompletableFuture<
             }
         }.thenApply { items ->
             if (items == null) return@thenApply null
-            output("assets", "version ${version.id} download: ${items.size} assets done")
+            output(version.id, "Assets downloading completed")
             DownloadAssetsResult(assetIndexUrl, items)
         }
     }

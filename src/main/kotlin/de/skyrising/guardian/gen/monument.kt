@@ -459,7 +459,7 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
             OPENED_LIBRARIES.computeIfAbsent(lib, ::getJarFileSystem)
         }
         if (assets != null) {
-            copyAssets(assets, resOut.resolve("assets"))
+            copyAssets(assets, resOut, postProcessors)
         }
         val decompile = decompiler.decompile(artifacts, version.id, jar, outputDir, libs) { className, addExtra ->
             if (className.replace('.', '/') in classes) {
