@@ -4,10 +4,7 @@ import de.skyrising.guardian.gen.*
 import org.objectweb.asm.*
 import org.objectweb.asm.commons.ClassRemapper
 import org.objectweb.asm.commons.Remapper
-import org.objectweb.asm.tree.ClassNode
-import org.objectweb.asm.tree.LocalVariableNode
-import org.objectweb.asm.tree.MethodInsnNode
-import org.objectweb.asm.tree.MethodNode
+import org.objectweb.asm.tree.*
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
@@ -119,7 +116,7 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
                     val revertedSubMappings = subMappings.invert(namespace)
                     val remappedSuperClasses = createSuperClassesMapping(remappedNodes)
                     for ((remappedName, remappedNode) in remappedNodes) {
-                        renameLocalVariables(remappedNode, revertedSubMappings.classes[remappedName], remappedSuperClasses)
+                        renameLocalVariables(remappedName, remappedNode, revertedSubMappings, remappedSuperClasses)
                     }
                 }
 
@@ -179,23 +176,74 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
     }
 }
 
-class LocalVariableRenamer(val superclasses: Map<String, MutableSet<String>>) {
-    private val names = mutableSetOf<String>()
-    private val nameCounts = mutableMapOf<String, Int>()
+class MethodVariableRenamer(private val className: String, private val methodNode: MethodNode, private val superclasses: Map<String, MutableSet<String>>, private val cmp: ClassMethodMappingProvider) {
     private val defaultLvNamePattern = Pattern.compile("^lvt\\d+$")
 
-    fun process(methodNode: MethodNode, methodMapping: MethodMapping?) {
+    fun process() {
+        processParams()
+        processLocalVariables()
+    }
+
+    private fun getMethodParameterMappingName(index: Int): String? {
+        val cannotSearchSuper = methodNode.name == "<init>" || (methodNode.access and Opcodes.ACC_PRIVATE) != 0
+
+        fun doGet(clazz: String): String? {
+            val methodMapping = cmp.get(clazz)?.get(methodNode)
+            methodMapping?.parameters?.get(index)?.name ?.let { return it }
+            if (cannotSearchSuper || clazz == "java/lang/Object") return null
+            val supers = superclasses[clazz]?.toList() ?: listOf()
+            supers.forEach { superClazz ->
+                // TODO: skip if enters a super private method
+                doGet(superClazz)?.let { return it }
+            }
+            return null
+        }
+        return doGet(className)
+    }
+
+    private fun processParams() {
+        val renamer = LocalVariableRenamer(superclasses)
+        val params = Type.getArgumentTypes(methodNode.desc)
+        if (methodNode.parameters == null) {
+            methodNode.parameters = List(params.size) { ParameterNode(null, 0) }
+        }
+        val isStatic = (methodNode.access and Opcodes.ACC_STATIC) != 0
+        val toRenameIdx = mutableListOf<Int>()
+        var index = if (isStatic) 0 else 1
+        for ((i, param) in methodNode.parameters.withIndex()) {
+            if (i >= params.size) {
+                break  // just in case
+            }
+            val paramName = getMethodParameterMappingName(index)
+            if (!paramName.isNullOrEmpty()) {
+                param.name = paramName
+                renamer.markExisting(paramName)
+            } else if (!param.name.isNullOrEmpty()) {
+                renamer.markExisting(param.name)
+            } else {
+                toRenameIdx.add(i)
+            }
+            index += params[i].size
+        }
+        for (i in toRenameIdx) {
+            val param = methodNode.parameters[i]
+            param.name = renamer.generateNameFor(params[i].descriptor, param.name)
+        }
+    }
+
+    private fun processLocalVariables() {
         if (methodNode.localVariables == null) {
             return
         }
 
+        val isStatic = (methodNode.access and Opcodes.ACC_STATIC) != 0
+        val renamer = LocalVariableRenamer(superclasses)
         val toRename = mutableListOf<LocalVariableNode>()
-        val isStatic = methodNode.access and Opcodes.ACC_STATIC != 0
         for (lv in methodNode.localVariables) {
             if (!isStatic && lv.index == 0) {
                 continue  // this
             }
-            val paramName = methodMapping?.parameters?.get(lv.index)?.name
+            val paramName = getMethodParameterMappingName(lv.index)
             var needsRename = false
             if (!paramName.isNullOrEmpty()) {
                 lv.name = paramName
@@ -204,16 +252,20 @@ class LocalVariableRenamer(val superclasses: Map<String, MutableSet<String>>) {
                 needsRename = true
             }
 
-            if (!needsRename){
-                names.add(lv.name)
-                nameCounts[lv.name] = 1
+            if (!needsRename) {
+                renamer.markExisting(lv.name)
             }
         }
 
         for (lv in toRename) {
-            lv.name = generateNameFor(lv.desc, lv.name)
+            lv.name = renamer.generateNameFor(lv.desc, lv.name)
         }
     }
+}
+
+class LocalVariableRenamer(private val superclasses: Map<String, MutableSet<String>>) {
+    private val names = mutableSetOf<String>()
+    private val nameCounts = mutableMapOf<String, Int>()
 
     data class VarName(val varName: String, val incrementLetter: Boolean)
 
@@ -296,7 +348,12 @@ class LocalVariableRenamer(val superclasses: Map<String, MutableSet<String>>) {
         }
     }
 
-    private fun generateNameFor(desc: String, fallback: String): String {
+    fun markExisting(name: String) {
+        names.add(name)
+        nameCounts[name] = 1
+    }
+
+    fun generateNameFor(desc: String, fallback: String?): String? {
         val varNameRet = generateVarName(desc) ?: return fallback
         var varName = varNameRet.varName
         val pluralVarName = varName + 's'
@@ -362,10 +419,21 @@ class LocalVariableRenamer(val superclasses: Map<String, MutableSet<String>>) {
     }
 }
 
-fun renameLocalVariables(remappedNode: ClassNode, reversedClassMapping: ClassMapping?, superclasses: Map<String, MutableSet<String>>) {
+fun interface MethodMappingProvider {
+    fun get(methodNode: MethodNode): MethodMapping?
+}
+
+fun interface ClassMethodMappingProvider {
+    fun get(className: String): MethodMappingProvider?
+}
+
+fun renameLocalVariables(remappedName: String, remappedNode: ClassNode, mapping: MappingTree, superclasses: Map<String, MutableSet<String>>) {
+    val cmp = ClassMethodMappingProvider { className ->
+        val cm = mapping.classes[className]?:return@ClassMethodMappingProvider null
+        MethodMappingProvider { methodNode -> cm.methods[MemberDescriptor(methodNode.name, methodNode.desc)]}
+    }
     for (methodNode in remappedNode.methods) {
-        val methodMapping = reversedClassMapping?.methods?.get(MemberDescriptor(methodNode.name, methodNode.desc))
-        LocalVariableRenamer(superclasses).process(methodNode, methodMapping)
+        MethodVariableRenamer(remappedName, methodNode, superclasses, cmp).process()
     }
 }
 
