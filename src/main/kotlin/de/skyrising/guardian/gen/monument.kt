@@ -407,7 +407,7 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
     ))
     val jarFuture = unit(getMappedMergedJar(version, provider, remapJarSem))
     val libsFuture = unit(downloadLibraries(version))
-    val assetsFuture = unit(downloadAssets(version))
+    val assetsFuture = unit(downloadAssets(version, unit))
     return CompletableFuture.allOf(jarFuture, libsFuture, assetsFuture).thenCompose {
         val extractResources = unit(getJar(version, MappingTarget.CLIENT)).thenCompose { jar ->
             if (Files.exists(resOut)) rmrf(resOut)

@@ -14,7 +14,7 @@ private data class AssetIndexJson(val objects: Map<String, AssetIndexItem>)
 data class DownloadAssetsResultItem(val assetPath: String, val downloadPath: String)
 data class DownloadAssetsResult(val indexUrl: String, val assets: List<DownloadAssetsResultItem>)
 
-fun downloadAssets(version: VersionInfo): CompletableFuture<DownloadAssetsResult?> =
+fun downloadAssets(version: VersionInfo, unit: ProgressUnit): CompletableFuture<DownloadAssetsResult?> =
     Timer(version.id, "downloadLangFiles").use {
         // $RUN_DIR/.cache/mc-versions/data/version/1.20.2.json
         val versionDetailsFilePath = MC_VERSIONS_DATA_DIR.resolve("version").resolve("$version.json")
@@ -58,22 +58,27 @@ fun downloadAssets(version: VersionInfo): CompletableFuture<DownloadAssetsResult
                     wantedAssets.add(WantedAsset(path, assetUrl, item.hash))
                 }
             }
-            output("assets", "version ${version.id} wantedAssets size: ${wantedAssets.size}")
+            output("assets", "version ${version.id} download: ${wantedAssets.size} assets start")
 
+            val assetUnit = unit.subUnit(wantedAssets.size)
             val futures = mutableListOf<CompletableFuture<DownloadAssetsResultItem>>()
             for (wa in wantedAssets) {
                 val assetPath = ASSETS_DIR.resolve(wa.hash.take(2)).resolve(wa.hash)
                 futures.add(download(URI(wa.url), assetPath).thenApply {
+                    assetUnit.done++
                     DownloadAssetsResultItem(
                         wa.path,
                         assetPath.toString()
                     )
                 })
             }
-            CompletableFuture.allOf(*futures.toTypedArray()).thenApply { futures.map { it.join() } }
+            CompletableFuture.allOf(*futures.toTypedArray()).thenApply {
+                assetUnit.done = assetUnit.tasks
+                futures.map { it.join() }
+            }
         }.thenApply { items ->
             if (items == null) return@thenApply null
-            output("assets", "version ${version.id} assets download done")
+            output("assets", "version ${version.id} download: ${items.size} assets done")
             DownloadAssetsResult(assetIndexUrl, items)
         }
     }
