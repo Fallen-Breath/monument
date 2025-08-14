@@ -208,8 +208,8 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
                 if (artifact == null) {
                     return@thenCompose CompletableFuture.completedFuture(null)
                 }
-                download(artifact.getURL(), jarFile).thenCompose {
-                    if (!Files.exists(jarFile)) return@thenCompose null
+                download(artifact.getURL(), jarFile).thenCompose download@ {
+                    if (!Files.exists(jarFile)) return@download null
                     supplyAsync(TaskType.READ_MAPPINGS) {
                         val mappingTree = getJarFileSystem(jarFile).use { fs ->
                             Files.newBufferedReader(getMappingFileInSrcJar(fs)).use(format::parse)
