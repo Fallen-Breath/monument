@@ -40,7 +40,7 @@ class FabricJavadocProviderCreator {
                     if (isRecord(clazz)) {
                         // insert record components docs to here
                         var needsNewLine = lines.size > 0
-                        clazz.recordComponents.forEach { comp ->
+                        clazz.recordComponents!!.forEach { comp ->
                             val comment = classData?.fields?.get(MemberDescriptor(comp.name, comp.descriptor).toString())
                             if (comment != null) {
                                 if (needsNewLine) {
