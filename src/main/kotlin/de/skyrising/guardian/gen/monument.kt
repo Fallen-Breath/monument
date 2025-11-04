@@ -200,6 +200,7 @@ class AsyncSemaphore(permits: Int) {
 }
 
 fun update(branch: String, action: String, recommitFrom: String?, manifest: Path?) {
+    println("Update start, branch: $branch, action: $action")
     val startTime = System.currentTimeMillis()
     val check = action == "check"
     if (!check) {
