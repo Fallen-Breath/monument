@@ -18,6 +18,7 @@ import java.util.regex.Pattern
 import java.util.zip.ZipInputStream
 
 val JARS_MAPPED_DIR: Path = JARS_DIR.resolve("mapped")
+const val VERSION_TYPE_UNOBFUSCATED = "unobfuscated"
 
 interface MappingProvider {
     val name: String
@@ -99,11 +100,25 @@ abstract class JarMappingProvider(override val name: String, override val format
 }
 
 open class MojangMappingProvider(override val name: String) : CommonMappingProvider(name, ProguardMappings, "txt", "official") {
+    override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
+        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
+            return CompletableFuture.completedFuture(true)
+        }
+        return super.supportsVersion(version, target, cache)
+    }
+
     override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> =
         if (target == MappingTarget.MERGED) CompletableFuture.completedFuture(null)
         else getMojangVersionManifest(version).thenApply { manifest ->
             manifest["downloads"]?.asJsonObject?.get(target.id + "_mappings")?.asJsonObject?.get("url")?.asString?.let { URI(it) }
         }
+
+    override fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path): CompletableFuture<MappingTree?> {
+        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
+            return CompletableFuture.completedFuture(MappingTree(arrayOf("official")))
+        }
+        return super.getMappings(version, mappings, target, cache)
+    }
 }
 
 class IntermediaryMappingProvider(prefix: String, private val meta: URI, private val maven: URI) : JarMappingProvider("$prefix-intermediary", GenericTinyReader) {
