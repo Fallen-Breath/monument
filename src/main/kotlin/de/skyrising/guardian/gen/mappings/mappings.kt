@@ -107,6 +107,13 @@ open class MojangMappingProvider(override val name: String) : CommonMappingProvi
         return super.supportsVersion(version, target, cache)
     }
 
+    override fun getVersion(version: VersionInfo): String {
+        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
+            return "none"
+        }
+        return super.getVersion(version)
+    }
+
     override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> =
         if (target == MappingTarget.MERGED) CompletableFuture.completedFuture(null)
         else getMojangVersionManifest(version).thenApply { manifest ->
