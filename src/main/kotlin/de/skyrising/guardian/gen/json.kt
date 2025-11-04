@@ -42,11 +42,12 @@ data class GitPerson(val name: String, val email: String)
 typealias SourcesConfig = Map<String, SourceConfig>
 typealias BranchesConfig = Map<String, BranchConfig>
 data class SourceConfig(val mappings: MappingProvider, val decompiler: Decompiler, val postProcessors: List<PostProcessor>)
-data class BranchConfig(val source: String, val head: String?, val base: String?, val filter: FilterConfig)
-data class FilterConfig(val type: String?, val exclude: List<String>) : Function1<VersionInfo, Boolean> {
+data class BranchConfig(val source: String, val head: String?, val base: String?, val headFilter: FilterConfig, val filter: FilterConfig)
+data class FilterConfig(val type: String?, val types: List<String>?, val typesExclude: List<String>, val exclude: List<String>) : Function1<VersionInfo, Boolean> {
     override fun invoke(version: VersionInfo) = when {
         type != null && version.type != type -> false
-        exclude.contains(version.id) -> false
+        types != null && !types.contains(version.type) -> false
+        typesExclude.contains(version.type) || exclude.contains(version.id) -> false
         else -> true
     }
 }
@@ -96,13 +97,16 @@ val GSON: Gson = GsonBuilder()
         val source: String = obj.require("source", context)
         val head: String? = obj["head", context]
         val base: String? = obj["base", context]
-        val filter: FilterConfig = obj["filter", context] ?: FilterConfig(null, listOf())
-        BranchConfig(source, head, base, filter)
+        val filter: FilterConfig = obj["filter", context] ?: FilterConfig(null, null, listOf(), listOf())
+        val headFilter: FilterConfig = obj["headFilter", context] ?: FilterConfig(null, null, listOf(), listOf())
+        BranchConfig(source, head, base, headFilter, filter)
     }
     .registerTypeAdapter<JsonObject, FilterConfig> { obj, _, context ->
         val type: String? = obj["type", context]
+        val types: List<String>? = obj["types", context]
+        val typesExclude: List<String> = obj["typesExclude", context] ?: listOf()
         val exclude: List<String> = obj["exclude", context] ?: listOf()
-        FilterConfig(type, exclude)
+        FilterConfig(type, types, typesExclude, exclude)
     }
     .registerTypeAdapter<JsonObject, SourceConfig> { obj, _, context ->
         val mappings: MappingProvider = obj.require("mappings", context)

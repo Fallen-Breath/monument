@@ -240,7 +240,15 @@ fun update(branch: String, action: String, recommitFrom: String?, manifest: Path
         return versions[id] ?: throw IllegalArgumentException("Unknown version '${id}'")
     }
     val base = getVersion(branchConfig.base)
-    val head = (if (branchConfig.head == null) newest else getVersion(branchConfig.head))
+    val head = run {
+        if (branchConfig.head != null) {
+            return@run getVersion(branchConfig.head)
+        }
+        if (newest != null && !branchConfig.headFilter(newest)) {
+            return@run locateHeadVersionByFilter(versions, branchConfig.headFilter)
+        }
+        return@run newest
+    }
         ?: throw IllegalStateException("No head version found")
     println("Finding path from ${base ?: "the beginning"} to $head")
     val branchVersions = Timer("", "findPredecessors").use {

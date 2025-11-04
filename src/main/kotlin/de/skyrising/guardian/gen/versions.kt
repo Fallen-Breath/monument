@@ -48,6 +48,9 @@ fun linkVersions(versions: Map<String, VersionInfo>): VersionInfo? {
     return previous
 }
 
+fun locateHeadVersionByFilter(versions: Map<String, VersionInfo>, filterConfig: FilterConfig): VersionInfo? =
+    versions.values.sortedDescending().firstOrNull(filterConfig)
+
 /**
  * Find all nodes on paths from [base] (or the beginning if null) to [head]
  *
