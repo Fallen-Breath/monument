@@ -23,6 +23,8 @@ const val VERSION_TYPE_UNOBFUSCATED = "unobfuscated"
 interface MappingProvider {
     val name: String
     val format: MappingsParser
+    val supportsUnobfuscated get() = false
+
     fun getVersion(version: VersionInfo): String = "latest"
     fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path = CACHE_DIR.resolve("mappings")): CompletableFuture<MappingTree?>
     fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path = CACHE_DIR.resolve("mappings")): CompletableFuture<Boolean> {
@@ -82,6 +84,25 @@ abstract class CommonMappingProvider(override val name: String, override val for
     override fun toString() = "${javaClass.simpleName}($name)"
 }
 
+class MojangMappingProvider(name: String) : CommonMappingProvider(name, ProguardMappings, "txt", "official") {
+    override val supportsUnobfuscated get() = true
+    override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> =
+        if (version.unobfuscated) CompletableFuture.completedFuture(target != MappingTarget.MERGED)
+        else super.supportsVersion(version, target, cache)
+    override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> =
+        if (target == MappingTarget.MERGED) CompletableFuture.completedFuture(null)
+        else getMojangVersionManifest(version).thenApply { manifest ->
+            manifest["downloads"]?.asJsonObject?.get(target.id + "_mappings")?.asJsonObject?.get("url")?.asString?.let { URI(it) }
+        }
+
+    override fun getVersion(version: VersionInfo): String {
+        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
+            return "none"
+        }
+        return super.getVersion(version)
+    }
+}
+
 abstract class JarMappingProvider(override val name: String, override val format: MappingsParser) : CommonMappingProvider(name, format, "jar") {
     open fun getFile(version: VersionInfo, mappings: String?, target: MappingTarget, jar: FileSystem): Path = jar.getPath("mappings/mappings.tiny")
     override fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path): CompletableFuture<MappingTree?> {
@@ -96,35 +117,6 @@ abstract class JarMappingProvider(override val name: String, override val format
                 }
             }
         }
-    }
-}
-
-open class MojangMappingProvider(override val name: String) : CommonMappingProvider(name, ProguardMappings, "txt", "official") {
-    override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
-        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
-            return CompletableFuture.completedFuture(true)
-        }
-        return super.supportsVersion(version, target, cache)
-    }
-
-    override fun getVersion(version: VersionInfo): String {
-        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
-            return "none"
-        }
-        return super.getVersion(version)
-    }
-
-    override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> =
-        if (target == MappingTarget.MERGED) CompletableFuture.completedFuture(null)
-        else getMojangVersionManifest(version).thenApply { manifest ->
-            manifest["downloads"]?.asJsonObject?.get(target.id + "_mappings")?.asJsonObject?.get("url")?.asString?.let { URI(it) }
-        }
-
-    override fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path): CompletableFuture<MappingTree?> {
-        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
-            return CompletableFuture.completedFuture(MappingTree(arrayOf("official")))
-        }
-        return super.getMappings(version, mappings, target, cache)
     }
 }
 

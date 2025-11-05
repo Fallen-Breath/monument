@@ -128,7 +128,8 @@ val GSON: Gson = GsonBuilder()
             obj.require("type", context),
             obj.require("url", context),
             obj["time", context] ?: obj.require("releaseTime", context),
-            obj.require("releaseTime", context)
+            obj.require("releaseTime", context),
+            false
         )
     }
     .registerTypeAdapter<JsonObject, DecompilerMap> { obj, _, context ->

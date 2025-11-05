@@ -174,11 +174,6 @@ object TinyMappingsV2 : LineBasedMappingFormat<TinyStateV2>() {
         return state
     }
 
-    private fun countIndent(line: String): Int {
-        for (i in line.indices) if (line[i] != '\t') return i
-        return line.length
-    }
-
     override fun decodeState(state: TinyStateV2) = state.tree
 
     override fun getLines(tree: MappingTree): Stream<String> {
@@ -218,12 +213,6 @@ class TinyStateV2(header: TinyHeader) : TinyState<TinyMappingTreeV2>(header, Tin
     var currentMember: MemberMapping? = null
     var currentParameter: ParameterImpl? = null
     var indent = 0
-
-    val top get() = when {
-        currentMember != null -> currentMember!!
-        currentClass != null -> currentClass!!
-        else -> throw IllegalStateException("No parent")
-    }
 
     fun unescape(s: String) = if (tree.properties.containsKey("escaped-names")) TinyMappingsV2.unescape(s) else s
 }

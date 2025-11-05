@@ -106,17 +106,20 @@ fun rmrf(path: Path) {
     })
 }
 
-fun copy(path: Path, to: Path, vararg options: CopyOption) {
+fun copy(path: Path, to: Path, vararg options: CopyOption, filter: (Path) -> Boolean = { true }) {
     Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
-        override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes?): FileVisitResult {
+        override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
             val dest = to.resolve(path.relativize(dir).toString())
             Files.createDirectories(dest)
             return FileVisitResult.CONTINUE
         }
 
         override fun visitFile(file: Path, attrs: BasicFileAttributes): FileVisitResult {
-            val dest = to.resolve(path.relativize(file).toString())
-            Files.copy(file, dest, *options)
+            val relative = path.relativize(file)
+            if (filter(relative)) {
+                val dest = to.resolve(relative.toString())
+                Files.copy(file, dest, *options)
+            }
             return FileVisitResult.CONTINUE
         }
     })
@@ -124,7 +127,7 @@ fun copy(path: Path, to: Path, vararg options: CopyOption) {
 
 fun copyCached(path: Path, to: Path, cacheDir: Path, renameJarResource: Boolean = false) {
     Files.walkFileTree(path, object : SimpleFileVisitor<Path>() {
-        override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes?): FileVisitResult {
+        override fun preVisitDirectory(dir: Path, attrs: BasicFileAttributes): FileVisitResult {
             val dest = to.resolve(path.relativize(dir).toString())
             Files.createDirectories(dest)
             return FileVisitResult.CONTINUE
@@ -151,7 +154,7 @@ fun writeCached(path: Path, content: ByteArray, cacheDir: Path) {
     val fileName = path.getName(path.nameCount - 1).toString()
     val extension = fileName.substringAfter('.', "")
     val suffix = if (extension.isNotEmpty()) ".$extension" else ""
-    val cachePath = cacheDir.resolve(hash.substring(0, 2)).resolve(hash.substring(2) + suffix)
+    val cachePath = cacheDir.resolve(hash.take(2)).resolve(hash.substring(2) + suffix)
     if (!Files.exists(cachePath)) {
         Files.createDirectories(cachePath.parent)
         Files.write(cachePath, content)
@@ -191,7 +194,7 @@ val STRUCTURE_PROCESSOR = object : PostProcessor {
 
     override fun process(path: Path, content: ByteArray): Pair<Path, ByteArray> {
         val nbtName = path.fileName.toString()
-        val snbtName = nbtName.substring(0, nbtName.length - 4) + ".snbt"
+        val snbtName = nbtName.dropLast(4) + ".snbt"
         val snbtOut = path.resolveSibling(snbtName)
         val tag = Tag.readCompressed(Files.newInputStream(path))
         convertStructure(tag)
@@ -356,7 +359,7 @@ fun convertStructure(tag: Tag) {
     }))
     tag["data"] = ListTag(ArrayList(blocksTag.map { block ->
         if (block !is CompoundTag) throw IllegalArgumentException("block should be a CompoundTag: $block")
-        val stateId = block["state"].let { if (it is IntTag) it else null } ?: return@map block
+        val stateId = block["state"].let { it as? IntTag } ?: return@map block
         block["state"] = StringTag(palette[stateId.value])
         block
     }))
@@ -366,7 +369,7 @@ fun convertStructure(tag: Tag) {
 
 fun tagToBlockStateString(tag: CompoundTag): String {
     val name = tag["Name"].let { if (it is StringTag) it.value else "minecraft:air" }
-    val props = tag["Properties"].let { if (it is CompoundTag) it else null } ?: return name
+    val props = tag["Properties"].let { it as? CompoundTag } ?: return name
     val sb = StringBuilder(name).append('{')
     var first = true
     for ((k, v) in props) {
@@ -378,7 +381,7 @@ fun tagToBlockStateString(tag: CompoundTag): String {
     return sb.append('}').toString()
 }
 
-fun useResourceFileSystem(cls: Class<*>, fn: (Path) -> Unit) {
+fun useResourceFileSystem(cls: Class<*> = Dummy::class.java, fn: (Path) -> Unit) {
     val root = cls.getResource("/.resourceroot") ?: throw IllegalStateException("Could not find resource root")
     val uri = root.toURI()
     when (uri.scheme) {
@@ -412,16 +415,6 @@ fun getMavenArtifacts(mvnArtifacts: List<MavenArtifact>): CompletableFuture<List
 
 private object Dummy
 
-fun extractGradleAndExtraSources(version: VersionInfo, out: Path): CompletableFuture<Unit> =
-    supplyAsync(TaskType.EXTRACT_RESOURCE) {
-        useResourceFileSystem(Dummy::class.java) {
-            copyCached(it.resolve("gradle_env"), out, RESOURCE_CACHE_DIR, true)
-            copyCached(it.resolve("extra_src"), out.resolve("src/main/java"), RESOURCE_CACHE_DIR, true)
-        }
-    }.thenCompose {
-        generateGradleBuild(version, out)
-    }
-
 fun getMonumentClassRoot(): Path? {
     val dummyClass = Dummy::class.java
     val dummyFileName = File.separator + dummyClass.name.replace('.', File.separatorChar) + ".class"
@@ -431,7 +424,7 @@ fun getMonumentClassRoot(): Path? {
     return when (uri.scheme) {
         "file" -> {
             val p = Paths.get(uri).toString()
-            Paths.get(p.substring(0, p.indexOf(dummyFileName)))
+            Paths.get(p.substringBefore(dummyFileName))
         }
 
         "jar" -> Paths.get(uri.schemeSpecificPart.substring(5, uri.schemeSpecificPart.indexOf('!')))
