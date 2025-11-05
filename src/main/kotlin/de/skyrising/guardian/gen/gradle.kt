@@ -25,6 +25,7 @@ private data class Dependency(val dependency: String, val type: String = "implem
 
 fun generateGradleBuild(version: VersionInfo, dir: Path): CompletableFuture<Unit> = getMojangVersionManifest(version).thenApply {
     generateGradleBuild(it, dir)
+    generateWorkspaceFiles(dir)
 }
 
 fun generateGradleBuild(manifest: JsonObject, dir: Path) {
@@ -33,7 +34,8 @@ fun generateGradleBuild(manifest: JsonObject, dir: Path) {
         val byCondition = mutableMapOf<String, MutableSet<Dependency>>()
         if (manifest["releaseTime"]!!.asString < "2025-10-28") {
             byCondition[""] = mutableSetOf(
-                Dependency("com.google.code.findbugs:jsr305:3.0.1", "compileOnly")
+                Dependency("com.google.code.findbugs:jsr305:3.0.1", "compileOnly"),
+                Dependency("org.jetbrains:annotations:26.0.2", "compileOnly"),
             )
         }
         for (lib in libs) {
@@ -103,6 +105,17 @@ fun generateGradleBuild(manifest: JsonObject, dir: Path) {
         out.println("""
             rootProject.name = "minecraft"
             """.trimIndent())
+    }
+}
+
+fun generateWorkspaceFiles(dir: Path) {
+    PrintWriter(Files.newBufferedWriter(dir.resolve(".gitignore"), StandardCharsets.UTF_8)).use { out ->
+        out.println("/.idea/")
+        out.println("/.vscode/")
+        out.println("/.gradle/")
+        out.println("/build/")
+        out.println("/out/")
+        out.println("/logs/")
     }
 }
 

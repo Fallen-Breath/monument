@@ -12,7 +12,9 @@ import org.jetbrains.java.decompiler.main.decompiler.DirectoryResultSaver
 import org.jetbrains.java.decompiler.main.extern.IFernflowerLogger
 import org.jetbrains.java.decompiler.main.extern.IFernflowerPreferences
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileNotFoundException
+import java.io.FileOutputStream
 import java.net.URI
 import java.net.URL
 import java.net.URLClassLoader
@@ -21,6 +23,10 @@ import java.nio.file.Path
 import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
+import kotlin.io.path.deleteIfExists
 import kotlin.io.path.extension
 
 interface Decompiler {
@@ -162,7 +168,7 @@ interface DecompileTask {
 
 @Suppress("unused")
 open class FernflowerDecompileTask : DecompileTask {
-    open protected fun getArgs(jar: Path, outputDir: Path, cp: List<Path>?, defaults: Map<String, Any>): Array<String> {
+    protected fun getArgs(jar: Path, outputDir: Path, cp: List<Path>?, defaults: Map<String, Any>): Array<String> {
         val args = mutableListOf("-ind=    ")
         if ("jrt" in defaults) {
             args.add("-jrt=1")
@@ -227,10 +233,27 @@ class DecompileTaskJavadocCommentFileHolder {
 
 @Suppress("unused")
 open class VineflowerDecompileTask : DecompileTask {
+    private fun createClassOnlyJar(srcJar: Path, dstJar: Path) {
+        ZipInputStream(FileInputStream(srcJar.toFile())).use { zis ->
+            ZipOutputStream(FileOutputStream(dstJar.toFile())).use { zos ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory && entry.name.endsWith(".class")) {
+                        zos.putNextEntry(ZipEntry(entry.name))
+                        zis.copyTo(zos)
+                        zos.closeEntry()
+                    }
+                    entry = zis.nextEntry
+                }
+            }
+        }
+    }
+
     override fun decompile(version: String, jar: Path, outputDir: (Boolean) -> Path, cp: List<Path>?, listener: (String,Boolean) -> Unit): Path {
         val outDir = outputDir(false)
-        val clsOutput = outDir.resolve("bin")
+        val classOnlyJar = outDir.resolve("src.jar")
         val srcOutput = outDir.resolve("src")
+        createClassOnlyJar(jar, classOnlyJar)
 
         val javadocCommentFile = DecompileTaskJavadocCommentFileHolder.files[version]
 
@@ -277,13 +300,14 @@ open class VineflowerDecompileTask : DecompileTask {
             if (cp != null) {
                 for (p in cp) ff.addLibrary(p.toFile())
             }
-            ff.addSource(jar.toFile())
+            ff.addSource(classOnlyJar.toFile())
 
             try {
                 ff.decompileContext()
             } finally {
                 ff.clearContext()
             }
+            classOnlyJar.deleteIfExists()
             output(version, "Decompilation completed")
         }
         return srcOutput

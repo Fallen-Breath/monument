@@ -18,7 +18,6 @@ import java.util.regex.Pattern
 import java.util.zip.ZipInputStream
 
 val JARS_MAPPED_DIR: Path = JARS_DIR.resolve("mapped")
-const val VERSION_TYPE_UNOBFUSCATED = "unobfuscated"
 
 interface MappingProvider {
     val name: String
@@ -84,7 +83,7 @@ abstract class CommonMappingProvider(override val name: String, override val for
     override fun toString() = "${javaClass.simpleName}($name)"
 }
 
-class MojangMappingProvider(name: String) : CommonMappingProvider(name, ProguardMappings, "txt", "official") {
+open class MojangMappingProvider(name: String) : CommonMappingProvider(name, ProguardMappings, "txt", "official") {
     override val supportsUnobfuscated get() = true
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> =
         if (version.unobfuscated) CompletableFuture.completedFuture(target != MappingTarget.MERGED)
@@ -95,12 +94,9 @@ class MojangMappingProvider(name: String) : CommonMappingProvider(name, Proguard
             manifest["downloads"]?.asJsonObject?.get(target.id + "_mappings")?.asJsonObject?.get("url")?.asString?.let { URI(it) }
         }
 
-    override fun getVersion(version: VersionInfo): String {
-        if (version.type == VERSION_TYPE_UNOBFUSCATED) {
-            return "none"
-        }
-        return super.getVersion(version)
-    }
+    override fun getVersion(version: VersionInfo): String =
+        if (version.unobfuscated) "none"
+        else super.getVersion(version)
 }
 
 abstract class JarMappingProvider(override val name: String, override val format: MappingsParser) : CommonMappingProvider(name, format, "jar") {
@@ -322,6 +318,7 @@ class ParchmentMappingProvider(override val name: String, private val maven: URI
         }
     }
 
+    override val supportsUnobfuscated get() = false  // TODO: not supported yet
     override fun getVersion(version: VersionInfo): String = helper.getMappingVersion(version)
 
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
