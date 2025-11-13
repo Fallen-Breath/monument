@@ -202,6 +202,12 @@ class MethodVariableRenamer(private val className: String, private val methodNod
     }
 
     private fun processParams() {
+        val isAbstract = (methodNode.access and Opcodes.ACC_ABSTRACT) != 0
+        if (!isAbstract) {
+            // perform params rename only for abstract methods
+            return
+        }
+
         val renamer = LocalVariableRenamer(superclasses)
         val params = Type.getArgumentTypes(methodNode.desc)
         if (methodNode.parameters == null) {
