@@ -3,7 +3,7 @@ package de.skyrising.guardian.gen.mappings
 import com.google.gson.Gson
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonArray
-import com.google.gson.annotations.SerializedName
+import com.google.gson.JsonObject
 import de.skyrising.guardian.gen.*
 import java.io.FileInputStream
 import java.io.InputStream
@@ -11,11 +11,14 @@ import java.net.URI
 import java.nio.file.FileSystem
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.function.Function
 import java.util.regex.Pattern
 import java.util.zip.ZipInputStream
+import kotlin.collections.set
+import kotlin.io.path.toPath
 
 val JARS_MAPPED_DIR: Path = JARS_DIR.resolve("mapped")
 
@@ -129,27 +132,27 @@ class IntermediaryMappingProvider(prefix: String, private val meta: URI, private
     }
 }
 
-data class MappingMetadata(
-    @SerializedName("name") val name: String,
-    @SerializedName("version") val version: String,
-)
+data class UnpickData(val unpickSpec: String, val unpickJarPath: String, val definitionsPath: String, val constantJarPath: String)
+data class MappingMetadata(val name: String, val version: String, val unpick: UnpickData?)
 
 class AdvancedMappingHelper(private val provider: MappingProvider) {
-    private val mappingVersions = ConcurrentHashMap<String, String>()  // version.id -> mapping version
+    private val mappingMetadata = ConcurrentHashMap<String, MappingMetadata>()  // version.id -> metadata
 
     fun getMappingVersion(version: VersionInfo): String {
-        return mappingVersions[version.id] ?: "unknown"
+        return mappingMetadata[version.id]?.version ?: "unknown"
     }
-    fun setMappingVersion(version: VersionInfo, mappingVersion: String) {
-        mappingVersions[version.id] = mappingVersion
+    fun setMappingMetadata(version: VersionInfo, metadata: MappingMetadata) {
+        mappingMetadata[version.id] = metadata
     }
     fun getMetadataJsonFile(cache: Path, version: VersionInfo, mappings: String?): Path = provider.getPath(cache, version, mappings).resolve("mappings-metadata.json")
     fun getCommentJsonFile(cache: Path, version: VersionInfo, mappings: String?): Path = provider.getPath(cache, version, mappings).resolve("mappings-comments.json")
 
-    fun writeMetadata(cache: Path, version: VersionInfo, mappings: String?) {
+    fun setAndWriteMetadata(cache: Path, version: VersionInfo, mappings: String?, mappingVersion: String, unpickData: UnpickData?) {
+        val metadata = MappingMetadata(provider.name, mappingVersion, unpickData)
+        setMappingMetadata(version, metadata)
         Files.newBufferedWriter(getMetadataJsonFile(cache, version, mappings)).use { writer ->
             val gson = GsonBuilder().setPrettyPrinting().disableHtmlEscaping().create()
-            gson.toJson(MappingMetadata(provider.name, getMappingVersion(version)), writer)
+            gson.toJson(metadata, writer)
         }
     }
 
@@ -162,11 +165,19 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
             return@use Gson().fromJson(reader, MappingMetadata::class.java)
         }
         if (metadata.name != provider.name) throw RuntimeException("Unmatched mapping provider name, read ${metadata.name}, should be ${provider.name}")
-        this.setMappingVersion(version, metadata.version)
+        this.setMappingMetadata(version, metadata)
     }
 
-    fun registerComment(cache: Path, version: VersionInfo) {
-        DecompileTaskJavadocCommentFileHolder.files[version.id] = getCommentJsonFile(cache, version, null)
+    fun registerDecompileExtraFeatures(cache: Path, version: VersionInfo) {
+        val metadata = mappingMetadata[version.id] ?: throw RuntimeException("Metadata of $version is not set yet")
+        DecompileTaskExtraFeatureHolder.comments[version.id] = getCommentJsonFile(cache, version, null)
+        if (metadata.unpick != null) {
+            DecompileTaskExtraFeatureHolder.unpicks[version.id] = DecompileTaskExtraFeatureHolder.Data(
+                metadata.unpick.unpickJarPath,
+                metadata.unpick.definitionsPath,
+                metadata.unpick.constantJarPath,
+            )
+        }
     }
 
     fun checkSkipAndLoadIfOk(cache: Path, version: VersionInfo, mappings: String?): Boolean {
@@ -174,7 +185,7 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
         if (canSkip) {
             // FIXME: relocate this side effect?
             loadMetadata(cache, version, mappings)
-            registerComment(cache, version)
+            registerDecompileExtraFeatures(cache, version)
         }
         return canSkip
     }
@@ -210,9 +221,29 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
         return this.getTinyMavenArtifact(version, target, "yarn").thenApply { artifact -> artifact?.getURL() }
     }
 
+    private fun readUnpickMetaAndGetUnpickJar(unpickMetaPath: Path): CompletableFuture<Pair<String, String>?> {
+        val unpickMeta = Gson().fromJson<JsonObject>(Files.newBufferedReader(unpickMetaPath))
+        val version = unpickMeta.get("version").asInt
+        if (version == 1) {
+            val unpickGroup = unpickMeta.get("unpickGroup").asString
+            val unpickVersion = unpickMeta.get("unpickVersion").asString
+            val unpickSpec = ArtifactSpec(unpickGroup, "unpick-cli", unpickVersion)
+            val unpickArtifact = MavenArtifact(maven, unpickSpec)
+
+            return getMavenArtifact(unpickArtifact).thenApply { uri ->
+                Pair(unpickSpec.toString(), uri.toPath().toString())
+            }
+        } else if (version == 2) {
+            // TODO
+            return CompletableFuture.completedFuture(null)
+        } else {
+            return CompletableFuture.completedFuture(null)
+        }
+    }
+
     override fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path): CompletableFuture<MappingTree?> {
         data class VersionedMappingTree(val ver: String, var mt: MappingTree)
-        fun getTinyMapping(what: String) : CompletableFuture<VersionedMappingTree?> {
+        fun getMappingJarFs(what: String) : CompletableFuture<Pair<MavenArtifact, FileSystem>?> {
             val jarFile = getPath(cache, version, mappings).resolve("${what}-${target.id}.jar")
             return getTinyMavenArtifact(version, target, what).thenCompose { artifact ->
                 if (artifact == null) {
@@ -221,26 +252,60 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
                 download(artifact.getURL(), jarFile).thenCompose download@ {
                     if (!Files.exists(jarFile)) return@download null
                     supplyAsync(TaskType.READ_MAPPINGS) {
-                        val mappingTree = getJarFileSystem(jarFile).use { fs ->
-                            Files.newBufferedReader(getMappingFileInSrcJar(fs)).use(format::parse)
-                        }
-                        VersionedMappingTree(artifact.artifact.version, mappingTree)
+                        Pair(artifact, getJarFileSystem(jarFile))
                     }
                 }
             }
         }
-        val intermediaryMappings = getTinyMapping("intermediary")
-        val yarnMappings = getTinyMapping("yarn")
-        return CompletableFuture.allOf(yarnMappings, intermediaryMappings).thenApply {
+        val intermediaryJar = getMappingJarFs("intermediary")
+        val yarnJar = getMappingJarFs("yarn")
+
+        fun getTinyMapping(fut: CompletableFuture<Pair<MavenArtifact, FileSystem>?>): CompletableFuture<VersionedMappingTree?> {
+            return fut.thenApply { pair ->
+                if (pair == null) return@thenApply null
+                val mappingTree = Files.newBufferedReader(getMappingFileInSrcJar(pair.second)).use(format::parse)
+                VersionedMappingTree(pair.first.artifact.version, mappingTree)
+            }
+        }
+        fun getUnpick(): CompletableFuture<UnpickData?> {
+            val what = "yarn"
+            return yarnJar.thenCompose { pair ->
+                if (pair == null) return@thenCompose null
+                val fs = pair.second
+                val unpickMetaFile = fs.getPath("extras/unpick.json")
+                if (!Files.exists(unpickMetaFile)) return@thenCompose null
+                val unpickDefPath = Files.copy(
+                    fs.getPath("extras/definitions.unpick"),
+                    getPath(cache, version, mappings).resolve("mappings-unpick.unpick"),
+                    StandardCopyOption.REPLACE_EXISTING,
+                )
+                readUnpickMetaAndGetUnpickJar(unpickMetaFile).thenCompose { maj ->
+                    if (maj == null) return@thenCompose null
+                    val constantsManifest = MavenArtifact(pair.first.mavenUrl, pair.first.artifact.copy(classifier = "constants"))
+                    val constantsJarPath = getPath(cache, version, mappings).resolve("${what}-${target.id}-constants.jar")
+                    download(constantsManifest.mavenUrl.resolve(constantsManifest.getPath()), constantsJarPath).thenApply {
+                        UnpickData(
+                            maj.first, maj.second,
+                            unpickDefPath.toFile().absolutePath,
+                            constantsJarPath.toFile().absolutePath,
+                        )
+                    }
+                }
+            }
+        }
+        val intermediaryMappings = getTinyMapping(intermediaryJar)
+        val yarnMappings = getTinyMapping(yarnJar)
+        val unpickData = getUnpick()
+        return CompletableFuture.allOf(yarnMappings, intermediaryMappings, unpickData).thenApply {
             val im = intermediaryMappings.get() ?: return@thenApply null
             val ym = yarnMappings.get() ?: return@thenApply null
+            val ud = unpickData.get()
 
             ym.mt = fixInvertedYarn(ym.mt)
 
-            helper.setMappingVersion(version, ym.ver)
-            helper.writeMetadata(cache, version, mappings)
+            helper.setAndWriteMetadata(cache, version, mappings, ym.ver, ud)
             helper.writeComment(cache, version, mappings, ym.mt, "named")
-            helper.registerComment(cache, version)
+            helper.registerDecompileExtraFeatures(cache, version)
 
             CombinedYarnMappingTree(im.mt, ym.mt)
         }
@@ -379,21 +444,28 @@ class ParchmentMappingProvider(override val name: String, private val maven: URI
             latestVersion
         }.thenCompose { parchmentVersion ->
             if (parchmentVersion == null) return@thenCompose CompletableFuture.completedFuture(null)
-            helper.setMappingVersion(version, parchmentVersion)
-            download(maven.resolve("org/parchmentmc/data/parchment-${version.id}/${parchmentVersion}/parchment-${version.id}-${parchmentVersion}.zip"), parchmentZipPath)
-        }.thenApply {
-            readFileInZip(parchmentZipPath, "parchment.json") { stream ->
+            download(maven.resolve("org/parchmentmc/data/parchment-${version.id}/${parchmentVersion}/parchment-${version.id}-${parchmentVersion}.zip"), parchmentZipPath).thenApply {
+                if (it == null) return@thenApply null
+                parchmentVersion
+            }
+        }.thenApply { parchmentVersion ->
+            if (parchmentVersion == null) return@thenApply null
+            val mapping = readFileInZip(parchmentZipPath, "parchment.json") { stream ->
                 stream.bufferedReader().use {
                     Gson().fromJson(it, ParchmentMappingJson::class.java)
                 }
             }
+            if (mapping == null) return@thenApply null
+            Pair(mapping, parchmentVersion)
         }.thenApply {
-            val parchmentMapping = it ?: return@thenApply null
+            if (it == null) return@thenApply null
+            val parchmentMapping = it.first
+            val parchmentVersion = it.second
             val resultMapping = applyParchmentMapping(mappingTree, parchmentMapping)
 
-            helper.writeMetadata(cache, version, mappings)
+            helper.setAndWriteMetadata(cache, version, mappings, parchmentVersion, null)
             helper.writeComment(cache, version, mappings, resultMapping, resultMapping.namespaces[1])
-            helper.registerComment(cache, version)
+            helper.registerDecompileExtraFeatures(cache, version)
 
             resultMapping
         }
