@@ -223,7 +223,7 @@ class TinyMappingTreeV2(namespaces: Array<String>) : MappingTree(namespaces) {
     val properties = linkedMapOf<String, String>()
 }
 
-class CombinedYarnMappingTree(val intermediary: MappingTree, val yarn: MappingTree) : MappingTree(arrayOf("official", "name")) {
+class CombinedYarnMappingTree(val intermediary: MappingTree, val yarn: MappingTree, val unpickData: UnpickData?) : MappingTree(arrayOf("official", "name")) {
     override fun invert(index: Int): MappingTree {
         throw UnsupportedOperationException()
     }

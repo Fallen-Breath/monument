@@ -7,9 +7,12 @@ import org.objectweb.asm.commons.Remapper
 import org.objectweb.asm.tree.*
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardCopyOption
 import java.util.concurrent.CompletableFuture
 import java.util.regex.Pattern
 import javax.lang.model.SourceVersion
+import kotlin.io.path.deleteIfExists
+import kotlin.io.path.nameWithoutExtension
 
 class AsmRemapper(private val tree: MappingTree, private val superClasses: Map<String, Set<String>>, private val namespace: Int = tree.namespaces.size - 1) : Remapper() {
     override fun map(internalName: String?): String? {
@@ -79,12 +82,12 @@ class AsmRemapper(private val tree: MappingTree, private val superClasses: Map<S
 
 fun getMappedJarOutput(provider: String, input: Path): Path = JARS_MAPPED_DIR.resolve(provider).resolve(JARS_DIR.relativize(input))
 
-fun mapJar(version: String, input: Path, mappings: MappingTree, provider: String, namespace: Int = mappings.namespaces.size - 1): CompletableFuture<Path> {
+fun mapJar(version: String, input: Path, mappings: MappingTree, provider: String, libsFuture: CompletableFuture<List<Path>>, namespace: Int = mappings.namespaces.size - 1): CompletableFuture<Path> {
     val output = getMappedJarOutput(provider, input)
-    return mapJar(version, input, output, mappings, namespace).thenApply { output }
+    return mapJar(version, input, output, mappings, libsFuture, namespace).thenApply { output }
 }
 
-fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, namespace: Int = mappings.namespaces.size - 1) = supplyAsync(TaskType.REMAP) {
+fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, libsFuture: CompletableFuture<List<Path>>, namespace: Int = mappings.namespaces.size - 1) = supplyAsync(TaskType.REMAP) {
     getJarFileSystem(input).use { inFs ->
         fun createSuperClassesMapping(classNodes: Map<String, ClassNode>): Map<String, MutableSet<String>> {
             val superClasses = mutableMapOf<String, MutableSet<String>>()
@@ -124,7 +127,9 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
             return remappedNodes
         }
 
-        createJarFileSystem(output).use { outFs ->
+        val remapOutput = output.resolveSibling(output.nameWithoutExtension + ".remapping.tmp")
+
+        createJarFileSystem(remapOutput).use { outFs ->
             val inRoot = inFs.getPath("/")
             val outRoot = outFs.getPath("/")
 
@@ -172,6 +177,17 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, na
                 Files.createDirectories(outPath.parent)
                 Files.write(outPath, classWriter.toByteArray())
             }
+        }
+
+        if (mappings is CombinedYarnMappingTree && mappings.unpickData != null) {
+            val ud = mappings.unpickData
+            val unpickOutput = output.resolveSibling(output.nameWithoutExtension + ".unpicked.tmp")
+            val cp = libsFuture.get()
+            runUnpick(remapOutput, unpickOutput, cp, ud)
+            remapOutput.deleteIfExists()
+            Files.move(unpickOutput, output, StandardCopyOption.REPLACE_EXISTING)
+        } else {
+            Files.move(remapOutput, output, StandardCopyOption.REPLACE_EXISTING)
         }
     }
 }

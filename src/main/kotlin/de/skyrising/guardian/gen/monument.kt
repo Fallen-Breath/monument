@@ -387,7 +387,7 @@ fun spellVersions(count: Int) = if (count == 1) "$count version" else "$count ve
 
 fun getSourcePath(version: String, mappings: MappingProvider, decompiler: Decompiler): Path = SOURCES_DIR.resolve(mappings.name).resolve(decompiler.name).resolve(version)
 
-fun getMappedMergedJar(version: VersionInfo, provider: MappingProvider, remapJarSem: AsyncSemaphore): CompletableFuture<Path> {
+fun getMappedMergedJar(version: VersionInfo, provider: MappingProvider, remapJarSem: AsyncSemaphore, libsFuture: CompletableFuture<List<Path>>): CompletableFuture<Path> {
     if (provider.canSkipFinishedMappedJar(MAPPINGS_CACHE_DIR, version)) {
         val mappedJarPath = getMappedJarOutput(provider.name, JARS_MERGED_DIR.resolve("${version.id}.jar"))
         if (Files.exists(mappedJarPath) && isJarGood(mappedJarPath, 10240)) return CompletableFuture.completedFuture(mappedJarPath)
@@ -399,7 +399,7 @@ fun getMappedMergedJar(version: VersionInfo, provider: MappingProvider, remapJar
             val m = mappings.get()
             if (m == null && provider.supportsUnobfuscated && version.unobfuscated) return@thenCompose jar
             if (m == null) throw IllegalStateException("No mappings")
-            return@thenCompose mapJar(version.id, jar.get(), m, provider.name)
+            return@thenCompose mapJar(version.id, jar.get(), m, provider.name, libsFuture)
         }
     }
 }
@@ -418,8 +418,8 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
         "Monument version: $MONUMENT_VERSION",
         "Decompiler: $decompilerArtifact",
     ))
-    val jarFuture = unit(getMappedMergedJar(version, provider, remapJarSem))
     val libsFuture = unit(downloadLibraries(version))
+    val jarFuture = unit(getMappedMergedJar(version, provider, remapJarSem, libsFuture))
     val assetsFuture = unit(downloadAssets(version, unit))
     return CompletableFuture.allOf(jarFuture, libsFuture, assetsFuture).thenCompose {
         val extractResources = unit(getJar(version, MappingTarget.CLIENT)).thenCompose { jar ->

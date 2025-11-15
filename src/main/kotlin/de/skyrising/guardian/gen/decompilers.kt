@@ -23,9 +23,6 @@ import java.nio.file.Path
 import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
-import java.util.logging.Handler
-import java.util.logging.LogRecord
-import java.util.logging.Logger
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
 import java.util.zip.ZipOutputStream
@@ -96,10 +93,7 @@ class JavaDecompiler(name: String, private val taskClassName: String, private va
         outputDir: (Boolean) -> Path,
         cp: List<Path>?,
         listener: (String,Boolean) -> Unit
-    ): CompletableFuture<Path> = getMavenArtifacts(artifacts).thenCompose { libsUrls: List<URI> ->
-        val urls = mutableListOf<URI>()
-        urls.addAll(libsUrls)
-        DecompileTaskExtraFeatureHolder.unpicks[version]?.unpickJarPaths?.forEach { urls.add(Path.of(it).toUri()) }
+    ): CompletableFuture<Path> = getMavenArtifacts(artifacts).thenCompose { urls: List<URI> ->
         supplyAsync(TaskType.DECOMPILE) {
             outputTo(version) {
                 val classLoader = if (allowSharing(artifacts)) {
@@ -232,10 +226,8 @@ open class FernflowerDecompileTask : DecompileTask {
 }
 
 class DecompileTaskExtraFeatureHolder {
-    data class Data(val unpickJarPaths: List<String>, val definitionsPath: String, val constantJarPath: String)
     companion object {
         val comments = ConcurrentHashMap<String, Path>()  // version -> path to the comments.json
-        val unpicks = ConcurrentHashMap<String, Data>()  // version -> data
     }
 }
 
@@ -257,52 +249,11 @@ open class VineflowerDecompileTask : DecompileTask {
         }
     }
 
-    // XXX: make other decompiler support unpick too?
-    private fun doUnpick(inputJar: Path, outputJar: Path, cp: List<Path>?, unpickData: DecompileTaskExtraFeatureHolder.Data) {
-        val logger = Logger.getLogger("unpick")
-        logger.setUseParentHandlers(false)
-        logger.addHandler(object : Handler() {
-            override fun publish(record: LogRecord?) {
-            }
-            override fun flush() {
-            }
-            override fun close() {
-            }
-        })
-        val argPaths = mutableListOf<Path>()
-        argPaths.add(inputJar)
-        argPaths.add(outputJar)
-        argPaths.add(Path.of(unpickData.definitionsPath))
-        argPaths.add(Path.of(unpickData.constantJarPath))
-        if (cp != null) {
-            for (p in cp) argPaths.add(p)
-        }
-        val args = argPaths.map { it.toFile().absolutePath }.toTypedArray()
-
-        try {
-            val clazz = Class.forName("daomephsta.unpick.cli.Main")
-            val method = clazz.getMethod("main", Array<String>::class.java)
-            method.invoke(null, args)
-        } catch (e: Exception) {
-            throw RuntimeException("Failed to run unpick", e)
-        }
-    }
-
     override fun decompile(version: String, jar: Path, outputDir: (Boolean) -> Path, cp: List<Path>?, listener: (String,Boolean) -> Unit): Path {
         val outDir = outputDir(false)
         val srcOutput = outDir.resolve("src")
         val classOnlyJar = outDir.resolve("src.jar")
-        val unpickJar = outDir.resolve("src-unpicked.jar")
-        val tempJars = listOf<Path>(classOnlyJar, unpickJar)
-
-        var toDecompileJar = classOnlyJar
         createClassOnlyJar(jar, classOnlyJar)
-
-        val unpickData = DecompileTaskExtraFeatureHolder.unpicks[version]
-        if (unpickData != null) {
-            doUnpick(toDecompileJar, unpickJar, cp, unpickData)
-            toDecompileJar = unpickJar
-        }
 
         val javadocCommentFile = DecompileTaskExtraFeatureHolder.comments[version]
 
@@ -349,14 +300,14 @@ open class VineflowerDecompileTask : DecompileTask {
             if (cp != null) {
                 for (p in cp) ff.addLibrary(p.toFile())
             }
-            ff.addSource(toDecompileJar.toFile())
+            ff.addSource(classOnlyJar.toFile())
 
             try {
                 ff.decompileContext()
             } finally {
                 ff.clearContext()
             }
-            tempJars.forEach { it.deleteIfExists() }
+            classOnlyJar.deleteIfExists()
             output(version, "Decompilation completed")
         }
         return srcOutput
