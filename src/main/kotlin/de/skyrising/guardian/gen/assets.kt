@@ -44,7 +44,7 @@ fun downloadAssets(version: VersionInfo, unit: ProgressUnit): CompletableFuture<
 
         val indexFilePath = ASSETS_DIR.resolve(assetIndexSha1.take(2)).resolve(assetIndexSha1)
         download(URI(assetIndexUrl), indexFilePath).thenCompose {
-            if (!Files.exists(indexFilePath)) return@thenCompose null
+            if (!Files.exists(indexFilePath)) return@thenCompose CompletableFuture.completedFuture(null)
             val assetIndex = GSON.fromJson(Files.newBufferedReader(indexFilePath), AssetIndexJson::class.java)
 
             data class WantedAsset(val path: String, val url: String, val hash: String)

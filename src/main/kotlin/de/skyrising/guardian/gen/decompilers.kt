@@ -15,7 +15,6 @@ import java.io.File
 import java.io.FileInputStream
 import java.io.FileNotFoundException
 import java.io.FileOutputStream
-import java.lang.reflect.InvocationTargetException
 import java.net.URI
 import java.net.URL
 import java.net.URLClassLoader
@@ -24,7 +23,8 @@ import java.nio.file.Path
 import java.util.*
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
-import java.util.function.IntFunction
+import java.util.logging.Handler
+import java.util.logging.LogRecord
 import java.util.logging.Logger
 import java.util.zip.ZipEntry
 import java.util.zip.ZipInputStream
@@ -99,10 +99,7 @@ class JavaDecompiler(name: String, private val taskClassName: String, private va
     ): CompletableFuture<Path> = getMavenArtifacts(artifacts).thenCompose { libsUrls: List<URI> ->
         val urls = mutableListOf<URI>()
         urls.addAll(libsUrls)
-        val unpickData = DecompileTaskExtraFeatureHolder.unpicks[version]
-        if (unpickData != null) {
-            urls.add(Path.of(unpickData.unpickJarPath).toUri())
-        }
+        DecompileTaskExtraFeatureHolder.unpicks[version]?.unpickJarPaths?.forEach { urls.add(Path.of(it).toUri()) }
         supplyAsync(TaskType.DECOMPILE) {
             outputTo(version) {
                 val classLoader = if (allowSharing(artifacts)) {
@@ -235,7 +232,7 @@ open class FernflowerDecompileTask : DecompileTask {
 }
 
 class DecompileTaskExtraFeatureHolder {
-    data class Data(val unpickJarPath: String, val definitionsPath: String, val constantJarPath: String)
+    data class Data(val unpickJarPaths: List<String>, val definitionsPath: String, val constantJarPath: String)
     companion object {
         val comments = ConcurrentHashMap<String, Path>()  // version -> path to the comments.json
         val unpicks = ConcurrentHashMap<String, Data>()  // version -> data
@@ -262,6 +259,16 @@ open class VineflowerDecompileTask : DecompileTask {
 
     // XXX: make other decompiler support unpick too?
     private fun doUnpick(inputJar: Path, outputJar: Path, cp: List<Path>?, unpickData: DecompileTaskExtraFeatureHolder.Data) {
+        val logger = Logger.getLogger("unpick")
+        logger.setUseParentHandlers(false)
+        logger.addHandler(object : Handler() {
+            override fun publish(record: LogRecord?) {
+            }
+            override fun flush() {
+            }
+            override fun close() {
+            }
+        })
         val argPaths = mutableListOf<Path>()
         argPaths.add(inputJar)
         argPaths.add(outputJar)

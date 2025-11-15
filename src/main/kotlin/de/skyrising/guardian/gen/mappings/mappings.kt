@@ -109,7 +109,7 @@ abstract class JarMappingProvider(override val name: String, override val format
         return getUrl(getPath(cache, version, mappings), version, mappings, target).thenCompose { url ->
             if (url == null) CompletableFuture.completedFuture(Unit) else download(url, jarFile)
         }.thenCompose {
-            if (!Files.exists(jarFile)) return@thenCompose null
+            if (!Files.exists(jarFile)) return@thenCompose CompletableFuture.completedFuture(null)
             supplyAsync(TaskType.READ_MAPPINGS) {
                 getJarFileSystem(jarFile).use { fs ->
                     Files.newBufferedReader(getFile(version, mappings, target, fs)).use(format::parse)
@@ -132,7 +132,7 @@ class IntermediaryMappingProvider(prefix: String, private val meta: URI, private
     }
 }
 
-data class UnpickData(val unpickSpec: String, val unpickJarPath: String, val definitionsPath: String, val constantJarPath: String)
+data class UnpickData(val unpickVersion: String, val unpickJarPaths: List<String>, val definitionsPath: String, val constantJarPath: String)
 data class MappingMetadata(val name: String, val version: String, val unpick: UnpickData?)
 
 class AdvancedMappingHelper(private val provider: MappingProvider) {
@@ -173,7 +173,7 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
         DecompileTaskExtraFeatureHolder.comments[version.id] = getCommentJsonFile(cache, version, null)
         if (metadata.unpick != null) {
             DecompileTaskExtraFeatureHolder.unpicks[version.id] = DecompileTaskExtraFeatureHolder.Data(
-                metadata.unpick.unpickJarPath,
+                metadata.unpick.unpickJarPaths,
                 metadata.unpick.definitionsPath,
                 metadata.unpick.constantJarPath,
             )
@@ -221,17 +221,23 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
         return this.getTinyMavenArtifact(version, target, "yarn").thenApply { artifact -> artifact?.getURL() }
     }
 
-    private fun readUnpickMetaAndGetUnpickJar(unpickMetaPath: Path): CompletableFuture<Pair<String, String>?> {
+    private fun readUnpickMetaAndGetUnpickJar(unpickMetaPath: Path): CompletableFuture<Pair<String, List<String>>?> {
         val unpickMeta = Gson().fromJson<JsonObject>(Files.newBufferedReader(unpickMetaPath))
         val version = unpickMeta.get("version").asInt
         if (version == 1) {
-            val unpickGroup = unpickMeta.get("unpickGroup").asString
-            val unpickVersion = unpickMeta.get("unpickVersion").asString
-            val unpickSpec = ArtifactSpec(unpickGroup, "unpick-cli", unpickVersion)
-            val unpickArtifact = MavenArtifact(maven, unpickSpec)
+            // always use fabric's latest unpick v2, instead of the one in unpick meta v1
+            val unpickGroup = "net.fabricmc.unpick"
+            val unpickVersion = "2.3.1"
+            val artifactFutures = listOf(
+                ArtifactSpec(unpickGroup, "unpick", unpickVersion),
+                ArtifactSpec(unpickGroup, "unpick-format-utils", unpickVersion),
+                ArtifactSpec(unpickGroup, "unpick-cli", unpickVersion),
+            ).map {
+                getMavenArtifact(MavenArtifact(maven, it))
+            }
 
-            return getMavenArtifact(unpickArtifact).thenApply { uri ->
-                Pair(unpickSpec.toString(), uri.toPath().toString())
+            return CompletableFuture.allOf(*artifactFutures.toTypedArray()).thenApply {
+                Pair(unpickVersion, artifactFutures.map { it.get().toPath().toString() })
             }
         } else if (version == 2) {
             // TODO
@@ -270,17 +276,17 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
         fun getUnpick(): CompletableFuture<UnpickData?> {
             val what = "yarn"
             return yarnJar.thenCompose { pair ->
-                if (pair == null) return@thenCompose null
+                if (pair == null) return@thenCompose CompletableFuture.completedFuture(null)
                 val fs = pair.second
                 val unpickMetaFile = fs.getPath("extras/unpick.json")
-                if (!Files.exists(unpickMetaFile)) return@thenCompose null
+                if (!Files.exists(unpickMetaFile)) return@thenCompose CompletableFuture.completedFuture(null)
                 val unpickDefPath = Files.copy(
                     fs.getPath("extras/definitions.unpick"),
                     getPath(cache, version, mappings).resolve("mappings-unpick.unpick"),
                     StandardCopyOption.REPLACE_EXISTING,
                 )
                 readUnpickMetaAndGetUnpickJar(unpickMetaFile).thenCompose { maj ->
-                    if (maj == null) return@thenCompose null
+                    if (maj == null) return@thenCompose CompletableFuture.completedFuture(null)
                     val constantsManifest = MavenArtifact(pair.first.mavenUrl, pair.first.artifact.copy(classifier = "constants"))
                     val constantsJarPath = getPath(cache, version, mappings).resolve("${what}-${target.id}-constants.jar")
                     download(constantsManifest.mavenUrl.resolve(constantsManifest.getPath()), constantsJarPath).thenApply {
