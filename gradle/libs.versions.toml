@@ -18,9 +18,13 @@ procyon-compilertools = { module = "org.bitbucket.mstrobel:procyon-compilertools
 vineflower = { module = "org.vineflower:vineflower", version = "1.11.1" }
 cfr = { module = "org.benf:cfr", version = "0.152" }
 
+unpick = { module = "net.fabricmc.unpick:unpick", version = "3.0.0-beta.13" }
+unpick-format-utils = { module = "net.fabricmc.unpick:unpick-format-utils", version = "3.0.0-beta.13" }
+
 [bundles]
 asm = ['asm', 'asm-tree', 'asm-commons']
 decompilers = ['procyon-compilertools', 'vineflower', 'cfr']
+mappingtools = ['unpick', 'unpick-format-utils']
 
 [plugins]
 jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }

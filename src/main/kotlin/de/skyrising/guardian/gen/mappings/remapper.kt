@@ -183,7 +183,7 @@ fun mapJar(version: String, input: Path, output: Path, mappings: MappingTree, li
             val ud = mappings.unpickData
             val unpickOutput = output.resolveSibling(output.nameWithoutExtension + ".unpicked.tmp")
             val cp = libsFuture.get()
-            runUnpick(remapOutput, unpickOutput, cp, ud)
+            runUnpick(remapOutput, unpickOutput, cp, ud, mappings)
             remapOutput.deleteIfExists()
             Files.move(unpickOutput, output, StandardCopyOption.REPLACE_EXISTING)
         } else {

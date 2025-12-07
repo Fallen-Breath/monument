@@ -173,6 +173,14 @@ fun getJarFileSystem(jar: Path): FileSystem {
     return FileSystems.newFileSystem(fsUri, mapOf<String, Any>())
 }
 
+data class JarFileSystemsHolder(val fileSystems: List<FileSystem>) : AutoCloseable {
+    override fun close() {
+        fileSystems.forEach { it.close()}
+    }
+}
+
+fun getJarFileSystems(jars: List<Path>): JarFileSystemsHolder = JarFileSystemsHolder(jars.map { getJarFileSystem(it) })
+
 fun createJarFileSystem(jar: Path): FileSystem {
     Files.createDirectories(jar.parent)
     val uri = jar.toUri()

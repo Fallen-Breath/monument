@@ -2,10 +2,21 @@ package de.skyrising.guardian.gen.mappings
 
 import com.google.gson.Gson
 import com.google.gson.JsonObject
-import de.skyrising.guardian.gen.ArtifactSpec
-import de.skyrising.guardian.gen.MavenArtifact
-import de.skyrising.guardian.gen.fromJson
-import de.skyrising.guardian.gen.getMavenArtifact
+import daomephsta.unpick.api.ConstantUninliner
+import daomephsta.unpick.api.classresolvers.ClassResolvers
+import daomephsta.unpick.api.classresolvers.IClassResolver
+import daomephsta.unpick.api.constantgroupers.ConstantGroupers
+import daomephsta.unpick.constantmappers.datadriven.parser.v3.UnpickV3Reader
+import daomephsta.unpick.constantmappers.datadriven.parser.v3.UnpickV3Remapper
+import daomephsta.unpick.constantmappers.datadriven.parser.v3.UnpickV3Writer
+import de.skyrising.guardian.gen.*
+import org.objectweb.asm.ClassReader
+import org.objectweb.asm.ClassWriter
+import org.objectweb.asm.Type
+import org.objectweb.asm.tree.ClassNode
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.io.StringReader
 import java.net.URI
 import java.net.URLClassLoader
 import java.nio.file.Files
@@ -15,6 +26,9 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 import java.util.logging.Logger
+import java.util.zip.ZipEntry
+import java.util.zip.ZipInputStream
+import java.util.zip.ZipOutputStream
 import kotlin.io.path.absolute
 import kotlin.io.path.toPath
 
@@ -31,16 +45,18 @@ data class UnpickData(
 fun readUnpickMeta(unpickMetaPath: Path): UnpickMeta? {
     val metaString = Files.newBufferedReader(unpickMetaPath).use { it.readText() }
     val unpickMeta = Gson().fromJson<JsonObject>(metaString)
-    val version = unpickMeta.get("version").asInt
-    if (version == 1) {
-        val metadata = Gson().fromJson(metaString, UnpickMetaV1::class.java)
-        return UnpickMeta(version, metadata, null)
-
-    } else if (version == 2) {
-        val metadata = Gson().fromJson(metaString, UnpickMetaV2::class.java)
-        return UnpickMeta(version, null, metadata)
-    } else {
-        return null
+    when (val version = unpickMeta.get("version").asInt) {
+        1 -> {
+            val metadata = Gson().fromJson(metaString, UnpickMetaV1::class.java)
+            return UnpickMeta(version, metadata, null)
+        }
+        2 -> {
+            val metadata = Gson().fromJson(metaString, UnpickMetaV2::class.java)
+            return UnpickMeta(version, null, metadata)
+        }
+        else -> {
+            return null
+        }
     }
 }
 
@@ -87,6 +103,38 @@ class UnpickRunnerClassLoader(libJars: List<URI>, parent: ClassLoader) :
             }
         }
     }
+
+    override fun loadClass(name: String, resolve: Boolean): Class<*> {
+        if (!shouldLoad(name)) {
+            return super.loadClass(name, resolve)
+        }
+        synchronized(getClassLoadingLock(name)) {
+            var c = findLoadedClass(name)
+            if (c == null) {
+                c = loadClassFromParent(name)
+            }
+            if (c == null) throw ClassNotFoundException(name)
+            if (resolve) resolveClass(c)
+            return c
+        }
+    }
+
+    private fun loadClassFromParent(name: String): Class<*>? {
+        val path = name.replace('.', '/') + ".class"
+        val stream = parent.getResourceAsStream(path)
+        return if (stream == null) {
+            super.loadClass(name, false)
+        } else {
+            val bytes = stream.readBytes()
+            defineClass(name, bytes, 0, bytes.size)
+        }
+    }
+
+    private fun shouldLoad(name: String): Boolean {
+        if (!name.startsWith("de.skyrising.guardian.gen.mappings.")) return false
+        val outerClass = name.substringBefore('$')
+        return outerClass.endsWith("UnpickV2Runner")
+    }
 }
 
 private class NullLogHandler() : Handler() {
@@ -123,14 +171,133 @@ private fun runUnpickV1(inputJar: Path, outputJar: Path, cp: List<Path>, meta: U
     }
 }
 
-private fun runUnpickV2(inputJar: Path, outputJar: Path, cp: List<Path>, meta: UnpickMetaV2, data: UnpickData) {
-    // not supported yet
+data class UnpickV2RunnerArgs(
+    val inputJar: Path,
+    val outputJar: Path,
+    val mcLibs: List<Path>,
+    val meta: UnpickMetaV2,
+    val data: UnpickData,
+    val mappings: CombinedYarnMappingTree,
+)
+
+@Suppress("unused")
+open class UnpickV2Runner {
+    fun run(args: UnpickV2RunnerArgs) {
+        val unpickClassPaths = mutableListOf<Path>()
+        unpickClassPaths.addAll(args.mcLibs)
+        args.data.constantJarPath?.let { unpickClassPaths.add(Path.of(it)) }
+        unpickClassPaths.add(args.inputJar)
+
+        var unpickDefContent = Files.newBufferedReader(Path.of(args.data.definitionsPath)).use { it.readText() }
+        if (args.meta.namespace != "named") {
+            if (args.meta.namespace != "intermediary") {
+                throw IllegalArgumentException("Unsupported unpick definition namespace '${args.meta.namespace}'")
+            }
+            val reader = UnpickV3Reader(StringReader(unpickDefContent))
+            val writer = UnpickV3Writer()
+            val yarn = args.mappings.yarn
+            val destNamespace = yarn.namespaces.size - 1
+
+            val mcAndItsLibClassLoader = URLClassLoader(unpickClassPaths.map { it.toUri().toURL() }.toTypedArray())
+
+            reader.accept(object : UnpickV3Remapper(writer) {
+                override fun mapClassName(className: String): String {
+                    return yarn.mapType(className.replace('.', '/'), destNamespace)
+                        ?.replace('/', '.') ?: className
+                }
+
+                override fun mapFieldName(className: String, fieldName: String, fieldDesc: String): String {
+                    val clz = yarn.classes[className.replace('.', '/')] ?: return fieldName
+                    return clz.fields[MemberDescriptor(fieldName, fieldDesc)]?.getName(destNamespace) ?: fieldName
+                }
+
+                override fun mapMethodName(className: String, methodName: String, methodDesc: String): String {
+                    val clz = yarn.classes[className.replace('.', '/')] ?: return methodName
+                    return clz.methods[MemberDescriptor(methodName, methodDesc)]?.getName(destNamespace) ?: methodName
+                }
+
+                override fun getClassesInPackage(pkg: String): List<String> {
+                    TODO("Not yet implemented: $pkg")
+                }
+
+                override fun getFieldDesc(className: String, fieldName: String): String {
+                    val yarnResult = yarn.classes[className.replace('.', '/')]?.fields?.firstOrNull { it.defaultName.name == fieldName }?.defaultName
+                    if (yarnResult != null) return yarnResult.type
+                    val clazz = Class.forName(className, false, mcAndItsLibClassLoader)
+                    val field = clazz.getDeclaredField(fieldName)
+                    return Type.getDescriptor(field.type)
+                }
+            })
+            unpickDefContent = writer.getOutput().replace(System.lineSeparator(), "\n")
+
+            // NOTE: debug only
+//            Files.newBufferedWriter(Path.of("remapped.unpick")).use { it.write(unpickDefContent) }
+        }
+
+        getJarFileSystems(unpickClassPaths).use {
+            val fileSystems = it.fileSystems
+            var resolver: IClassResolver = ClassResolvers.fromDirectory(fileSystems[0].getPath("/"))
+            for (i in 1 until unpickClassPaths.size) {
+                resolver = resolver.chain(ClassResolvers.fromDirectory(fileSystems[i].getPath("/")))
+            }
+            resolver = resolver.chain(ClassResolvers.classpath())
+
+            val uninliner = ConstantUninliner.builder()
+//            .logger(net.fabricmc.loom.task.service.UnpickService.JAVA_LOGGER)
+                .classResolver(resolver)
+                .grouper(
+                    ConstantGroupers.dataDriven()
+//                    .logger(net.fabricmc.loom.task.service.UnpickService.JAVA_LOGGER)
+                        .lenient(true)  // meta is v1
+                        .classResolver(resolver)
+                        .mappingSource(StringReader(unpickDefContent))
+                        .build()
+                )
+                .build()
+
+            ZipInputStream(FileInputStream(args.inputJar.toFile())).use { zis ->
+                ZipOutputStream(FileOutputStream(args.outputJar.toFile())).use { zos ->
+                    var entry = zis.nextEntry
+                    while (entry != null) {
+                        if (!entry.isDirectory && entry.name.endsWith(".class")) {
+                            val classNode = ClassNode()
+                            val reader = ClassReader(zis)
+                            reader.accept(classNode, 0)
+                            uninliner.transform(classNode)
+                            val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+                            classNode.accept(writer)
+
+                            zos.putNextEntry(ZipEntry(entry.name))
+                            zos.write(writer.toByteArray())
+                            zos.closeEntry()
+                        }
+                        entry = zis.nextEntry
+                    }
+                }
+            }
+        }
+    }
 }
 
-fun runUnpick(inputJar: Path, outputJar: Path, cp: List<Path>, data: UnpickData) {
+private fun runUnpickV2(inputJar: Path, outputJar: Path, cp: List<Path>, meta: UnpickMetaV2, data: UnpickData, mappings: CombinedYarnMappingTree) {
+    val classLoader = UnpickRunnerClassLoader.create(data.unpickJarPaths.map { Path.of(it).absolute().toUri() })
+    try {
+        val clazz = Class.forName("de.skyrising.guardian.gen.mappings.UnpickV2Runner", true, classLoader)
+        val obj = clazz.getDeclaredConstructor().newInstance()
+        if (obj.javaClass.classLoader != classLoader) {
+            throw IllegalStateException("$obj loaded by incorrect class loader: ${obj.javaClass.classLoader}")
+        }
+        val method = clazz.getMethod("run", UnpickV2RunnerArgs::class.java)
+        method.invoke(obj, UnpickV2RunnerArgs(inputJar, outputJar, cp, meta, data, mappings))
+    } catch (e: Exception) {
+        throw RuntimeException("Failed to run unpick", e)
+    }
+}
+
+fun runUnpick(inputJar: Path, outputJar: Path, cp: List<Path>, data: UnpickData, mappings: CombinedYarnMappingTree) {
     when (data.metadata.version) {
         1 -> runUnpickV1(inputJar, outputJar, cp, data.metadata.v1!!, data)
-        2 -> runUnpickV2(inputJar, outputJar, cp, data.metadata.v2!!, data)
+        2 -> runUnpickV2(inputJar, outputJar, cp, data.metadata.v2!!, data, mappings)
         else -> throw RuntimeException("unsupported version ${data.metadata.version}")
     }
 }

@@ -35,6 +35,7 @@ dependencies {
     implementation(libs.jline.terminal)
 
     compileOnly(libs.bundles.decompilers)
+    compileOnly(libs.bundles.mappingtools)
 }
 
 application {
