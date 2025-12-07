@@ -290,7 +290,7 @@ fun update(branch: String, action: String, recommitFrom: String?, manifest: Path
         executor.decompileParallelism = minOf(executor.decompileParallelism, missing.size)
         val progressUnits = mutableListOf<ProgressUnit>()
         // limit maximum concurrency, or tons of mapping variables within ongoing futures will eat all memory
-        val remapJarSem = AsyncSemaphore(maxOf(executor.decompileParallelism, 2))
+        val remapJarSem = AsyncSemaphore(maxOf(executor.decompileParallelism * 2, 2))
         for (version in missing) {
             val unit = ProgressUnit(2, 0)
             progressUnits.add(unit)
