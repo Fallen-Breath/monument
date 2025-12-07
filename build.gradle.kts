@@ -67,11 +67,13 @@ tasks.jar {
 }
 
 tasks.shadowJar {
-    archiveClassifier.set("")
-    doLast {
-        val jar = archiveFile.get().asFile.toPath()
-        val link = jar.resolveSibling("monument-latest.jar")
-        link.deleteIfExists()
-        Files.createSymbolicLink(link, jar.fileName)
+    if (!System.getProperty("os.name").lowercase().contains("windows")) {
+        archiveClassifier.set("")
+        doLast {
+            val jar = archiveFile.get().asFile.toPath()
+            val link = jar.resolveSibling("monument-latest.jar")
+            link.deleteIfExists()
+            Files.createSymbolicLink(link, jar.fileName)
+        }
     }
 }
