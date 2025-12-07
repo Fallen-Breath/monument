@@ -21,6 +21,8 @@ import java.util.concurrent.CompletableFuture
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicInteger
+import kotlin.io.path.Path
+import kotlin.io.path.createDirectories
 import kotlin.system.exitProcess
 
 val INITIAL_MAX_THREADS = maxOf(Runtime.getRuntime().availableProcessors(), 1)
@@ -29,7 +31,8 @@ var MAX_THREADS = INITIAL_MAX_THREADS
 val threadLocalContext: ThreadLocal<Context> = ThreadLocal.withInitial { Context.default }
 
 val _t = run {
-    TraceEvents.start(Path.of("logs", "trace.json"))
+    Path("logs").createDirectories()
+    TraceEvents.start(Path("logs", "trace.json"))
     Runtime.getRuntime().addShutdownHook(Thread {
         TraceEvents.stop()
     })
@@ -86,6 +89,7 @@ fun main(args: Array<String>) {
     }
     val parser = OptionParser()
     val helpArg = parser.accepts("help").forHelp()
+    val versionArg = parser.accepts("version")
     val nonOptionsArg = parser.nonOptions()
     val recommitArg = parser.acceptsAll(listOf("r", "recommit"), "Recommit more of the history than necessary").withOptionalArg().ofType(String::class.java)
     val manifestArg = parser.acceptsAll(listOf("m", "manifest"), "Specify a custom version manifest file").withOptionalArg().ofType(String::class.java)
@@ -102,6 +106,10 @@ fun main(args: Array<String>) {
         val options = parser.parse(*args)
         if (options.has(helpArg)) {
             printUsage()
+            return
+        }
+        if (options.has(versionArg)) {
+            println(MONUMENT_VERSION)
             return
         }
         if (options.has(recommitArg)) {
@@ -474,9 +482,9 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
         if (assets != null) {
             copyAssets(assets, resOut, postProcessors)
         }
-        val decompile = decompiler.decompile(artifacts, version.id, jar, outputDir, libs) { className, addExtra ->
+        val decompile = decompiler.decompile(artifacts, version.id, jar, outputDir, libs) { (className, addExtra, trace) ->
             if (className.replace('.', '/') in classes) {
-                TraceEvent.Instant(name = "${if (addExtra) "Preprocessing" else "Decompiled"} Class", cat = "decompile,${version.id}", args = mapOf("class" to className))
+                if (trace) TraceEvent.Instant(name = "${if (addExtra) "Preprocessed" else "Decompiled"} Class", cat = "decompile,${version.id}", args = mapOf("class" to className))
                 classesUnit.done++
                 if (addExtra) classesUnit.tasks++
             }
