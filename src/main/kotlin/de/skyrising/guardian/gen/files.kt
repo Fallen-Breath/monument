@@ -170,12 +170,16 @@ private fun hex(bytes: ByteArray) =
 fun getJarFileSystem(jar: Path): FileSystem {
     val uri = jar.toUri()
     val fsUri = URI("jar:${uri.scheme}", uri.userInfo, uri.host, uri.port, uri.path, uri.query, uri.fragment)
-    return FileSystems.newFileSystem(fsUri, mapOf<String, Any>())
+    try {
+        return FileSystems.newFileSystem(fsUri, mapOf<String, Any>())
+    } catch (e: Exception) {
+        throw RuntimeException("Error creating jar filesystem for $fsUri: $e", e)
+    }
 }
 
 data class JarFileSystemsHolder(val fileSystems: List<FileSystem>) : AutoCloseable {
     override fun close() {
-        fileSystems.forEach { it.close()}
+        fileSystems.forEach { it.close() }
     }
 }
 

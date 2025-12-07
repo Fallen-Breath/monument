@@ -14,15 +14,13 @@ import org.objectweb.asm.ClassReader
 import org.objectweb.asm.ClassWriter
 import org.objectweb.asm.Type
 import org.objectweb.asm.tree.ClassNode
-import java.io.FileInputStream
-import java.io.FileOutputStream
-import java.io.StringReader
+import java.io.*
 import java.net.URI
 import java.net.URLClassLoader
+import java.nio.file.FileSystem
 import java.nio.file.Files
 import java.nio.file.Path
 import java.util.concurrent.CompletableFuture
-import java.util.concurrent.ConcurrentHashMap
 import java.util.logging.Handler
 import java.util.logging.LogRecord
 import java.util.logging.Logger
@@ -94,13 +92,9 @@ class UnpickRunnerClassLoader(libJars: List<URI>, parent: ClassLoader) :
     URLClassLoader(libJars.map { it.toURL() }.toTypedArray(), parent) {
 
     companion object {
-        private val classLoaders = ConcurrentHashMap<List<URI>, ClassLoader>()
-
         fun create(libJars: List<URI>): ClassLoader {
             val classLoader = Thread.currentThread().contextClassLoader
-            return classLoaders.computeIfAbsent(libJars) {
-                UnpickRunnerClassLoader(libJars, classLoader)
-            }
+            return UnpickRunnerClassLoader(libJars, classLoader)
         }
     }
 
@@ -133,7 +127,7 @@ class UnpickRunnerClassLoader(libJars: List<URI>, parent: ClassLoader) :
     private fun shouldLoad(name: String): Boolean {
         if (!name.startsWith("de.skyrising.guardian.gen.mappings.")) return false
         val outerClass = name.substringBefore('$')
-        return outerClass.endsWith("UnpickV2Runner")
+        return outerClass.endsWith("UnpickV2Runner") || outerClass.endsWith("NullLogHandler")
     }
 }
 
@@ -178,15 +172,23 @@ data class UnpickV2RunnerArgs(
     val meta: UnpickMetaV2,
     val data: UnpickData,
     val mappings: CombinedYarnMappingTree,
+    val mcLibsFsMap: Map<Path, FileSystem>,
 )
 
 @Suppress("unused")
 open class UnpickV2Runner {
     fun run(args: UnpickV2RunnerArgs) {
+        val logger = Logger.getLogger("unpick")
+        logger.setUseParentHandlers(false)
+        logger.addHandler(NullLogHandler())
+
+        val unpickNonMcLibPaths = mutableListOf<Path>()
+        args.data.constantJarPath?.let { unpickNonMcLibPaths.add(Path.of(it)) }
+        unpickNonMcLibPaths.add(args.inputJar)
+
         val unpickClassPaths = mutableListOf<Path>()
         unpickClassPaths.addAll(args.mcLibs)
-        args.data.constantJarPath?.let { unpickClassPaths.add(Path.of(it)) }
-        unpickClassPaths.add(args.inputJar)
+        unpickClassPaths.addAll(unpickNonMcLibPaths)
 
         var unpickDefContent = Files.newBufferedReader(Path.of(args.data.definitionsPath)).use { it.readText() }
         if (args.meta.namespace != "named") {
@@ -234,45 +236,50 @@ open class UnpickV2Runner {
 //            Files.newBufferedWriter(Path.of("remapped.unpick")).use { it.write(unpickDefContent) }
         }
 
-        getJarFileSystems(unpickClassPaths).use {
-            val fileSystems = it.fileSystems
+        getJarFileSystems(unpickNonMcLibPaths).use {
+            val fileSystems = mutableListOf<FileSystem>()
+            fileSystems.addAll(args.mcLibs.mapNotNull(args.mcLibsFsMap::get))
+            fileSystems.addAll(it.fileSystems)
+
             var resolver: IClassResolver = ClassResolvers.fromDirectory(fileSystems[0].getPath("/"))
             for (i in 1 until unpickClassPaths.size) {
                 resolver = resolver.chain(ClassResolvers.fromDirectory(fileSystems[i].getPath("/")))
             }
             resolver = resolver.chain(ClassResolvers.classpath())
 
-            val uninliner = ConstantUninliner.builder()
-//            .logger(net.fabricmc.loom.task.service.UnpickService.JAVA_LOGGER)
-                .classResolver(resolver)
-                .grouper(
-                    ConstantGroupers.dataDriven()
-//                    .logger(net.fabricmc.loom.task.service.UnpickService.JAVA_LOGGER)
-                        .lenient(true)  // meta is v1
-                        .classResolver(resolver)
-                        .mappingSource(StringReader(unpickDefContent))
-                        .build()
-                )
-                .build()
+            runUnpick(resolver, StringReader(unpickDefContent), args.inputJar.toFile(), args.outputJar.toFile())
+        }
+    }
 
-            ZipInputStream(FileInputStream(args.inputJar.toFile())).use { zis ->
-                ZipOutputStream(FileOutputStream(args.outputJar.toFile())).use { zos ->
-                    var entry = zis.nextEntry
-                    while (entry != null) {
-                        if (!entry.isDirectory && entry.name.endsWith(".class")) {
-                            val classNode = ClassNode()
-                            val reader = ClassReader(zis)
-                            reader.accept(classNode, 0)
-                            uninliner.transform(classNode)
-                            val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
-                            classNode.accept(writer)
+    private fun runUnpick(resolver: IClassResolver, mappingSource: Reader, inputFile: File, outputFile: File) {
+        val uninliner = ConstantUninliner.builder()
+            .classResolver(resolver)
+            .grouper(
+                ConstantGroupers.dataDriven()
+                    .lenient(false)  // value == is meta v1
+                    .classResolver(resolver)
+                    .mappingSource(mappingSource)
+                    .build()
+            )
+            .build()
 
-                            zos.putNextEntry(ZipEntry(entry.name))
-                            zos.write(writer.toByteArray())
-                            zos.closeEntry()
-                        }
-                        entry = zis.nextEntry
+        ZipInputStream(FileInputStream(inputFile)).use { zis ->
+            ZipOutputStream(FileOutputStream(outputFile)).use { zos ->
+                var entry = zis.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory && entry.name.endsWith(".class")) {
+                        val classNode = ClassNode()
+                        val reader = ClassReader(zis)
+                        reader.accept(classNode, 0)
+                        uninliner.transform(classNode)
+                        val writer = ClassWriter(ClassWriter.COMPUTE_MAXS)
+                        classNode.accept(writer)
+
+                        zos.putNextEntry(ZipEntry(entry.name))
+                        zos.write(writer.toByteArray())
+                        zos.closeEntry()
                     }
+                    entry = zis.nextEntry
                 }
             }
         }
@@ -280,6 +287,9 @@ open class UnpickV2Runner {
 }
 
 private fun runUnpickV2(inputJar: Path, outputJar: Path, cp: List<Path>, meta: UnpickMetaV2, data: UnpickData, mappings: CombinedYarnMappingTree) {
+    val cpFsMap = mutableMapOf<Path, FileSystem>()
+    cp.forEach { cpFsMap[it] = OPENED_LIBRARIES.computeIfAbsent(it, ::getJarFileSystem) }
+
     val classLoader = UnpickRunnerClassLoader.create(data.unpickJarPaths.map { Path.of(it).absolute().toUri() })
     try {
         val clazz = Class.forName("de.skyrising.guardian.gen.mappings.UnpickV2Runner", true, classLoader)
@@ -288,7 +298,7 @@ private fun runUnpickV2(inputJar: Path, outputJar: Path, cp: List<Path>, meta: U
             throw IllegalStateException("$obj loaded by incorrect class loader: ${obj.javaClass.classLoader}")
         }
         val method = clazz.getMethod("run", UnpickV2RunnerArgs::class.java)
-        method.invoke(obj, UnpickV2RunnerArgs(inputJar, outputJar, cp, meta, data, mappings))
+        method.invoke(obj, UnpickV2RunnerArgs(inputJar, outputJar, cp, meta, data, mappings, cpFsMap))
     } catch (e: Exception) {
         throw RuntimeException("Failed to run unpick", e)
     }
