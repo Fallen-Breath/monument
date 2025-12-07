@@ -74,7 +74,6 @@ val OPENED_LIBRARIES = ConcurrentHashMap<Path, FileSystem>()
 
 fun main(args: Array<String>) {
     FlightRecorder.register(TimerEvent::class.java)
-    Files.createDirectories(Paths.get("logs"))
     Files.createDirectories(CACHE_DIR)
     if (FlightRecorder.isAvailable() && !FlightRecorder.getFlightRecorder().recordings.stream().map(Recording::getState).anyMatch { it == RecordingState.NEW || it == RecordingState.RUNNING }) {
         val conf = Configuration.create(Context::class.java.getResourceAsStream("/flightrecorder-config.jfc")!!.reader())

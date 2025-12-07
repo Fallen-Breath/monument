@@ -287,7 +287,7 @@ open class VineflowerDecompileTask : DecompileTask {
         }
     }
 
-    override fun decompile(version: String, jar: Path, outputDir: (Boolean) -> Path, cp: List<Path>?, listener: (String,Boolean) -> Unit): Path {
+    override fun decompile(version: String, jar: Path, outputDir: (Boolean) -> Path, cp: List<Path>?, listener: (DecompilerNotification) -> Unit): Path {
         val outDir = outputDir(false)
         val srcOutput = outDir.resolve("src")
         val classOnlyJar = outDir.resolve("src.jar")
@@ -317,14 +317,14 @@ open class VineflowerDecompileTask : DecompileTask {
                 override fun startReadingClass(className: String?) {
                     if (className != null) {
                         output(version, "Decompiling class $className")
-                        listener(className, false)
+                        listener(DecompilerNotification(className, addExtra = false, trace = false))
                     }
                 }
 
                 override fun startProcessingClass(className: String?) {
                     if (className != null) {
                         output(version, "Preprocessing class $className")
-                        listener(className, true)
+                        listener(DecompilerNotification(className, addExtra = true, trace = false))
                     }
                 }
 

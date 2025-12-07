@@ -21,7 +21,7 @@ version = run("git describe --tags --dirty --long --match v*.*").split('-')
     .filter { !it.startsWith("g") }
     .joinToString(".")
     .replace(".dirty", "+dirty")
-    .substring(1)
+    .removePrefix("v")
 
 java {
     toolchain {
