@@ -32,11 +32,10 @@ fun generateGradleBuild(manifest: JsonObject, dir: Path) {
     PrintWriter(Files.newBufferedWriter(dir.resolve("build.gradle.kts"), StandardCharsets.UTF_8)).use { out ->
         val libs = manifest["libraries"]!!.asJsonArray
         val byCondition = mutableMapOf<String, MutableSet<Dependency>>()
+        val annotationDependencies = byCondition.computeIfAbsent("") { mutableSetOf() }
+        annotationDependencies.add(Dependency("org.jetbrains:annotations:26.0.2", "compileOnly"))
         if (manifest["releaseTime"]!!.asString < "2025-10-28") {
-            byCondition[""] = mutableSetOf(
-                Dependency("com.google.code.findbugs:jsr305:3.0.1", "compileOnly"),
-                Dependency("org.jetbrains:annotations:26.0.2", "compileOnly"),
-            )
+            annotationDependencies.add(Dependency("com.google.code.findbugs:jsr305:3.0.1", "compileOnly"))
         }
         for (lib in libs) {
             // TODO: natives? Just getting the java parts is enough to fix syntax highlighting
