@@ -442,7 +442,7 @@ fun genSources(unit: ProgressUnit, version: VersionInfo, provider: MappingProvid
             "- Minecraft version: `${version.id}`",
             "- Asset index: `${assets?.indexUrl ?: "N/A"}`",
             "- Mapping type: `${provider.name}`",
-            "- Mapping version: `${provider.getVersion(version)}`",
+            "- Mapping version: `${provider.getProvidedMappingVersion(version)}`",
             "- Decompiler: `${decompilerArtifact}`",
             "",
             "**DO NOT REDISTRIBUTE**"

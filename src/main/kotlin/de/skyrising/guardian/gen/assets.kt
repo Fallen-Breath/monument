@@ -6,7 +6,7 @@ import java.nio.file.Files
 import java.util.concurrent.CompletableFuture
 
 // see: $RUN_DIR/.cache/mc-versions/src/types.d.ts
-private data class TempVersionManifestJson(val assetHash: String, val assetIndex: String, val lastModified: String)
+private data class TempVersionManifestJson(val assetHash: String, val assetIndex: String, val lastModified: String?)
 private data class VersionInfoJson(val manifests: List<TempVersionManifestJson>)
 private data class AssetIndexItem(val hash: String, val size: Int)
 private data class AssetIndexJson(val objects: Map<String, AssetIndexItem>)
@@ -25,7 +25,7 @@ fun downloadAssets(version: VersionInfo, unit: ProgressUnit): CompletableFuture<
         // Reason: Mojang now keeps updating translation files for all MC versions >= 22w42a, and we don't want the latest translation file
         // See also: https://minecraft.wiki/w/Language?oldid=3085719#file-history:~:text=1.19.3-,22w42a,-Language%20files%20are
         val lastManifest = versionDetails.manifests.lastOrNull()
-        val bestManifest = versionDetails.manifests.minByOrNull { it.lastModified }
+        val bestManifest = if (versionDetails.manifests.any { it.lastModified == null }) null else versionDetails.manifests.minByOrNull { it.lastModified!! }
         if (bestManifest == null) {
             output("assets", "no manifest for version ${version.id}, skipped")
             return CompletableFuture.completedFuture(null)

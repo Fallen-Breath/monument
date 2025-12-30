@@ -24,7 +24,7 @@ interface MappingProvider {
     val format: MappingsParser
     val supportsUnobfuscated get() = false
 
-    fun getVersion(version: VersionInfo): String = "latest"
+    fun getProvidedMappingVersion(version: VersionInfo): String = "latest"
     fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path = CACHE_DIR.resolve("mappings")): CompletableFuture<MappingTree?>
     fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path = CACHE_DIR.resolve("mappings")): CompletableFuture<Boolean> {
         return getLatestMappings(version, target, cache).thenApply { it != null }
@@ -54,6 +54,7 @@ interface MappingProvider {
         val QUILT_INTERMEDIARY = IntermediaryMappingProvider("quilt", URI("https://meta.quiltmc.org/v3/"), URI("https://maven.quiltmc.org/repository/release/"))
         val YARN = YarnMappingProvider("yarn", URI("https://meta.fabricmc.net/v2/"), URI("https://maven.fabricmc.net/"))
         val LEGACY_YARN = YarnMappingProvider("legacy-yarn", URI("https://meta.legacyfabric.net/v2/"), URI("https://maven.legacyfabric.net/"))
+        val FEATHER_GEN2 = FeatherGen2MappingProvider("feather-gen2", URI("https://maven.ornithemc.net/releases/"))
         val PARCHMENT = ParchmentMappingProvider("parchment", URI("https://maven.parchmentmc.org/"))
     }
 }
@@ -94,9 +95,9 @@ open class MojangMappingProvider(name: String) : CommonMappingProvider(name, Pro
             manifest["downloads"]?.asJsonObject?.get(target.id + "_mappings")?.asJsonObject?.get("url")?.asString?.let { URI(it) }
         }
 
-    override fun getVersion(version: VersionInfo): String =
+    override fun getProvidedMappingVersion(version: VersionInfo): String =
         if (version.unobfuscated) "none"
-        else super.getVersion(version)
+        else super.getProvidedMappingVersion(version)
 }
 
 abstract class JarMappingProvider(override val name: String, override val format: MappingsParser) : CommonMappingProvider(name, format, "jar") {
@@ -134,7 +135,7 @@ data class MappingMetadata(val name: String, val version: String, val unpick: Un
 class AdvancedMappingHelper(private val provider: MappingProvider) {
     private val mappingMetadata = ConcurrentHashMap<String, MappingMetadata>()  // version.id -> metadata
 
-    fun getMappingVersion(version: VersionInfo): String {
+    fun getProvidedMappingVersion(version: VersionInfo): String {
         return mappingMetadata[version.id]?.version ?: "unknown"
     }
     fun setMappingMetadata(version: VersionInfo, metadata: MappingMetadata) {
@@ -180,9 +181,74 @@ class AdvancedMappingHelper(private val provider: MappingProvider) {
     }
 }
 
-class YarnMappingProvider(override val name: String, private val meta: URI, private val maven: URI) : CommonMappingProvider(name, GenericTinyReader, "jar") {
-    private val helper = AdvancedMappingHelper(this)
-    private fun getMappingFileInSrcJar(jar: FileSystem): Path = jar.getPath("mappings/mappings.tiny")
+abstract class CommonTinyMappingProvider(name: String, format: MappingsParser) : CommonMappingProvider(name, format, "jar") {
+    protected val helper = AdvancedMappingHelper(this)
+    protected abstract val namedName: String
+
+    override fun getProvidedMappingVersion(version: VersionInfo): String = helper.getProvidedMappingVersion(version)
+
+    override fun canSkipFinishedMappedJar(cache: Path, version: VersionInfo): Boolean {
+        // ensure the javadocProviders is created
+        // XXX: currently the mappings var is always null
+        return helper.checkSkipAndLoadIfOk(cache, version, null)
+    }
+
+    // utils
+    protected data class VersionedMappingTree(val ver: String, var mt: MappingTree)
+
+    protected fun getMappingFileInSrcJar(jar: FileSystem): Path = jar.getPath("mappings/mappings.tiny")
+
+    protected fun parseTinyMappingFromFileSystem(fut: CompletableFuture<Pair<MavenArtifact, FileSystem>?>): CompletableFuture<VersionedMappingTree?> {
+        return fut.thenApply { pair ->
+            if (pair == null) return@thenApply null
+            val mappingTree = Files.newBufferedReader(getMappingFileInSrcJar(pair.second)).use(format::parse)
+            VersionedMappingTree(pair.first.artifact.version, mappingTree)
+        }
+    }
+
+    protected fun createUnpickDataFromJar(
+        version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path,
+        namedJarFuture: CompletableFuture<Pair<MavenArtifact, FileSystem>?>,
+        unpickMavenUrl: URI,
+    ): CompletableFuture<UnpickData?> {
+        return namedJarFuture.thenCompose { pair ->
+            if (pair == null) return@thenCompose CompletableFuture.completedFuture(null)
+            val fs = pair.second
+            val unpickMetaFile = fs.getPath("extras/unpick.json")
+            if (!Files.exists(unpickMetaFile)) return@thenCompose CompletableFuture.completedFuture(null)
+            val unpickDefPath = Files.copy(
+                fs.getPath("extras/definitions.unpick"),
+                getPath(cache, version, mappings).resolve("mappings-unpick.unpick"),
+                StandardCopyOption.REPLACE_EXISTING,
+            )
+            val metadata = readUnpickMeta(unpickMetaFile) ?: return@thenCompose CompletableFuture.completedFuture(null)
+            val unpickLibs = downloadUnpickLib(unpickMavenUrl, metadata)
+            var constantsJar = CompletableFuture.completedFuture<Path?>(null)
+            val v2Constants = metadata.v2?.constants
+            if (metadata.v1 != null || v2Constants != null) {
+                val constantsManifest = MavenArtifact(
+                    pair.first.mavenUrl,
+                    if (v2Constants != null) ArtifactSpec.of(v2Constants)
+                    else pair.first.artifact.copy(classifier = "constants")
+                )
+                val constantsJarPath = getPath(cache, version, mappings).resolve("${namedName}-${target.id}-constants.jar")
+                constantsJar = download(constantsManifest.mavenUrl.resolve(constantsManifest.getPath()), constantsJarPath).thenApply { constantsJarPath }
+            }
+            CompletableFuture.allOf(unpickLibs, constantsJar).thenApply {
+                UnpickData(
+                    metadata,
+                    unpickLibs.get().map { it.toString() },
+                    unpickDefPath.toFile().absolutePath,
+                    constantsJar.get()?.toFile()?.absolutePath,
+                )
+            }
+        }
+    }
+}
+
+class YarnMappingProvider(override val name: String, private val meta: URI, private val maven: URI) : CommonTinyMappingProvider(name, GenericTinyReader) {
+    override val namedName: String = "yarn"
+
     private val allYarnVersions: CompletableFuture<Set<String>?> by lazy {
         requestJson<JsonArray>(meta.resolve("versions/game/yarn")).handle { it, e ->
             if (e != null) throw e
@@ -194,8 +260,6 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
             return@thenApply versions
         }
     }
-
-    override fun getVersion(version: VersionInfo): String = helper.getMappingVersion(version)
 
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
         return allYarnVersions.thenApply { versions ->
@@ -229,51 +293,9 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
         val intermediaryJar = getMappingJarFs("intermediary")
         val yarnJar = getMappingJarFs("yarn")
 
-        fun getTinyMapping(fut: CompletableFuture<Pair<MavenArtifact, FileSystem>?>): CompletableFuture<VersionedMappingTree?> {
-            return fut.thenApply { pair ->
-                if (pair == null) return@thenApply null
-                val mappingTree = Files.newBufferedReader(getMappingFileInSrcJar(pair.second)).use(format::parse)
-                VersionedMappingTree(pair.first.artifact.version, mappingTree)
-            }
-        }
-        fun getUnpick(): CompletableFuture<UnpickData?> {
-            val what = "yarn"
-            return yarnJar.thenCompose { pair ->
-                if (pair == null) return@thenCompose CompletableFuture.completedFuture(null)
-                val fs = pair.second
-                val unpickMetaFile = fs.getPath("extras/unpick.json")
-                if (!Files.exists(unpickMetaFile)) return@thenCompose CompletableFuture.completedFuture(null)
-                val unpickDefPath = Files.copy(
-                    fs.getPath("extras/definitions.unpick"),
-                    getPath(cache, version, mappings).resolve("mappings-unpick.unpick"),
-                    StandardCopyOption.REPLACE_EXISTING,
-                )
-                val metadata = readUnpickMeta(unpickMetaFile) ?: return@thenCompose CompletableFuture.completedFuture(null)
-                val unpickLibs = downloadUnpickLib(maven, metadata)
-                var constantsJar = CompletableFuture.completedFuture<Path?>(null)
-                val v2Constants = metadata.v2?.constants
-                if (metadata.v1 != null || v2Constants != null) {
-                    val constantsManifest = MavenArtifact(
-                        pair.first.mavenUrl,
-                        if (v2Constants != null) ArtifactSpec.of(v2Constants)
-                        else pair.first.artifact.copy(classifier = "constants")
-                    )
-                    val constantsJarPath = getPath(cache, version, mappings).resolve("${what}-${target.id}-constants.jar")
-                    constantsJar = download(constantsManifest.mavenUrl.resolve(constantsManifest.getPath()), constantsJarPath).thenApply { constantsJarPath }
-                }
-                CompletableFuture.allOf(unpickLibs, constantsJar).thenApply {
-                    UnpickData(
-                        metadata,
-                        unpickLibs.get().map { it.toString() },
-                        unpickDefPath.toFile().absolutePath,
-                        constantsJar.get()?.toFile()?.absolutePath,
-                    )
-                }
-            }
-        }
-        val intermediaryMappings = getTinyMapping(intermediaryJar)
-        val yarnMappings = getTinyMapping(yarnJar)
-        val unpickData = getUnpick()
+        val intermediaryMappings = parseTinyMappingFromFileSystem(intermediaryJar)
+        val yarnMappings = parseTinyMappingFromFileSystem(yarnJar)
+        val unpickData = createUnpickDataFromJar(version, mappings, target, cache, yarnJar, maven)
         return CompletableFuture.allOf(yarnMappings, intermediaryMappings, unpickData).thenApply {
             val im = intermediaryMappings.get() ?: return@thenApply null
             val ym = yarnMappings.get() ?: return@thenApply null
@@ -331,11 +353,88 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
             MavenArtifact(maven, spec.copy(classifier = "v2"))
         }
     }
+}
 
-    override fun canSkipFinishedMappedJar(cache: Path, version: VersionInfo): Boolean {
-        // ensure the javadocProviders is created
-        // XXX: currently the mappings var is always null
-        return helper.checkSkipAndLoadIfOk(cache, version, null)
+class FeatherGen2MappingProvider(override val name: String, private val maven: URI) : CommonTinyMappingProvider(name, GenericTinyReader) {
+    override val namedName: String = "feather"
+    private val allSupportedVersions: CompletableFuture<Map<String, String>?> by lazy {
+        requestText(maven.resolve("net/ornithemc/feather-gen2/maven-metadata.xml")).handle { it, e ->
+            if (e != null) null else it
+        }.thenApply {
+            if (it.isNullOrEmpty()) return@thenApply null
+            val versions = mutableMapOf<String, String>()
+            val pattern = Pattern.compile("""^\s*<version>(([^+<>]+)\+build\.\d+)</version>.*$""")
+            it.lines().forEach { line ->
+                val matcher = pattern.matcher(line)
+                if (matcher.matches()) {
+                    val fullVersion = matcher.group(1)  // "1.20.1+build.123"
+                    val mcVersion = matcher.group(2)  // "1.20.1"
+                    if (fullVersion != null && mcVersion != null) {
+                        versions[mcVersion] = fullVersion
+                    }
+                }
+            }
+            return@thenApply versions
+        }
+    }
+
+    override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
+        return allSupportedVersions.thenApply { versions ->
+            if (versions == null) {
+                throw RuntimeException("allSupportedVersions is null")
+            }
+            return@thenApply versions.contains(version.id)
+        }
+    }
+
+    private fun getTinyMavenArtifact(version: VersionInfo, target: MappingTarget, intermediary: Boolean): CompletableFuture<MavenArtifact?> {
+        if (target != MappingTarget.MERGED) return CompletableFuture.completedFuture(null)
+        return allSupportedVersions.thenApply { versions ->
+            val fullVersion = versions?.get(version.id) ?:return@thenApply null
+            MavenArtifact(maven, ArtifactSpec(
+                group = "net.ornithemc",
+                id = if (intermediary) "calamus-intermediary-gen2" else "feather-gen2",
+                version = if (intermediary) version.id else fullVersion,
+            ))
+        }
+    }
+
+    override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> {
+        return this.getTinyMavenArtifact(version, target, false).thenApply { artifact -> artifact?.getURL() }
+    }
+
+    override fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path): CompletableFuture<MappingTree?> {
+        fun getMappingJarFs(intermediary: Boolean) : CompletableFuture<Pair<MavenArtifact, FileSystem>?> {
+            val jarFile = getPath(cache, version, mappings).resolve("${if (intermediary) "intermediary" else "feather"}-${target.id}.jar")
+            return getTinyMavenArtifact(version, target, intermediary).thenCompose { artifact ->
+                if (artifact == null) {
+                    return@thenCompose CompletableFuture.completedFuture(null)
+                }
+                download(artifact.getURL(), jarFile).thenCompose download@ {
+                    if (!Files.exists(jarFile)) return@download null
+                    supplyAsync(TaskType.READ_MAPPINGS) {
+                        Pair(artifact, getJarFileSystem(jarFile))
+                    }
+                }
+            }
+        }
+        val unpickMavenUrl = URI.create("https://maven.fabricmc.net/")  // use fabric's
+        val intermediaryJar = getMappingJarFs(true)
+        val featherJar = getMappingJarFs(false)
+        val intermediaryMappings = parseTinyMappingFromFileSystem(intermediaryJar)
+        val featherMappings = parseTinyMappingFromFileSystem(featherJar)
+        val unpickData = createUnpickDataFromJar(version, mappings, target, cache, featherJar, unpickMavenUrl)
+        return CompletableFuture.allOf(featherMappings, intermediaryMappings, unpickData).thenApply {
+            val im = intermediaryMappings.get() ?: return@thenApply null
+            val ym = featherMappings.get() ?: return@thenApply null
+            val ud = unpickData.get()
+
+            helper.setAndWriteMetadata(cache, version, mappings, ym.ver, ud)
+            helper.writeComment(cache, version, mappings, ym.mt, "named")
+            helper.registerDecompileExtraFeatures(cache, version)
+
+            CombinedYarnMappingTree(im.mt, ym.mt, null)  // FIXME: unpick not supported yet
+        }
     }
 }
 
@@ -363,7 +462,7 @@ class ParchmentMappingProvider(override val name: String, private val maven: URI
     }
 
     override val supportsUnobfuscated get() = false  // TODO: not supported yet
-    override fun getVersion(version: VersionInfo): String = helper.getMappingVersion(version)
+    override fun getProvidedMappingVersion(version: VersionInfo): String = helper.getProvidedMappingVersion(version)
 
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
         val allSupportedVersionsFuture = allSupportedVersions

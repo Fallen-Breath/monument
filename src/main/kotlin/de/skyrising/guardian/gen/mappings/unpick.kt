@@ -69,8 +69,9 @@ fun downloadUnpickLib(mavenUrl: URI, metadata: UnpickMeta): CompletableFuture<Li
     }
     if (metadata.v1 != null) {
         // always use fabric's latest unpick v2, instead of the one in unpick meta v1
-        val unpickGroup = "net.fabricmc.unpick"
-        val unpickVersion = "2.3.1"
+        val useFabricLatestUnpickV2 = true
+        val unpickGroup = if (useFabricLatestUnpickV2) "net.fabricmc.unpick" else metadata.v1.unpickGroup
+        val unpickVersion = if (useFabricLatestUnpickV2) "2.3.1" else metadata.v1.unpickVersion
         return downloadArtifacts(
             ArtifactSpec(unpickGroup, "unpick", unpickVersion),
             ArtifactSpec(unpickGroup, "unpick-format-utils", unpickVersion),
