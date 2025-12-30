@@ -298,20 +298,21 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
             throw RuntimeException("unexpected yarn mapping namespaces: ${mappingTree.namespaces}")
         }
         val rawMethodPattern = Pattern.compile("^method_\\d+$")
-        var sampleCnt = 0
+        var rawNamedDiffCount = 0
+        var totalDiffCnt = 0
         mappingTree.classes.forEach check@ { cm ->
             cm.methods.forEach { mm ->
                 val intermediaryName = mm.getName(idxI)
                 val namedName = mm.getName(idxN)
-                if (namedName != intermediaryName && rawMethodPattern.matcher(namedName).matches()) {
-                    sampleCnt++
-                    if (sampleCnt >= 100) {
-                        return@check
+                if (namedName != intermediaryName) {
+                    totalDiffCnt++
+                    if (rawMethodPattern.matcher(namedName).matches()) {
+                        rawNamedDiffCount++
                     }
                 }
             }
         }
-        if (sampleCnt >= 100) {
+        if (rawNamedDiffCount >= totalDiffCnt * 0.7) {  // for at least 1.14.1 and 1.14.2, the ratio is 1.0
             val newMappingTree = mappingTree.invert("named")
             System.arraycopy(mappingTree.namespaces, 0, newMappingTree.namespaces, 0, mappingTree.namespaces.size)
             return newMappingTree
