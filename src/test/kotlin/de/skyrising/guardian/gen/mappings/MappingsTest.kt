@@ -131,6 +131,6 @@ class MappingsTest {
         assertNotNull(txt)
         val tree = ProguardMappings.parse(BufferedReader(StringReader(txt)))
         val result = tree.toString(ProguardMappings)
-        assertEquals(txt.split('\n').let { it.subList(1, it.size) }, result.split('\n'))
+        assertEquals(txt.lines().drop(1), result.lines())
     }
 }
