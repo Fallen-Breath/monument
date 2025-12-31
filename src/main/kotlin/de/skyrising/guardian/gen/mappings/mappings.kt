@@ -357,7 +357,7 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
 
 class FeatherGen2MappingProvider(override val name: String, private val maven: URI) : CommonTinyMappingProvider(name, GenericTinyReader) {
     override val namedName: String = "feather"
-    private val allSupportedVersions: CompletableFuture<Map<String, String>?> by lazy {
+    private val allFeatherVersions: CompletableFuture<Map<String, String>?> by lazy {
         requestText(maven.resolve("net/ornithemc/feather-gen2/maven-metadata.xml")).handle { it, e ->
             if (e != null) null else it
         }.thenApply {
@@ -379,7 +379,7 @@ class FeatherGen2MappingProvider(override val name: String, private val maven: U
     }
 
     override fun supportsVersion(version: VersionInfo, target: MappingTarget, cache: Path): CompletableFuture<Boolean> {
-        return allSupportedVersions.thenApply { versions ->
+        return allFeatherVersions.thenApply { versions ->
             if (versions == null) {
                 throw RuntimeException("allSupportedVersions is null")
             }
@@ -387,26 +387,26 @@ class FeatherGen2MappingProvider(override val name: String, private val maven: U
         }
     }
 
-    private fun getTinyMavenArtifact(version: VersionInfo, target: MappingTarget, intermediary: Boolean): CompletableFuture<MavenArtifact?> {
+    private fun getTinyMavenArtifact(version: VersionInfo, target: MappingTarget): CompletableFuture<MavenArtifact?> {
         if (target != MappingTarget.MERGED) return CompletableFuture.completedFuture(null)
-        return allSupportedVersions.thenApply { versions ->
+        return allFeatherVersions.thenApply { versions ->
             val fullVersion = versions?.get(version.id) ?:return@thenApply null
             MavenArtifact(maven, ArtifactSpec(
                 group = "net.ornithemc",
-                id = if (intermediary) "calamus-intermediary-gen2" else "feather-gen2",
-                version = if (intermediary) version.id else fullVersion,
+                id = "feather-gen2",
+                version = fullVersion,
             ))
         }
     }
 
     override fun getUrl(cache: Path, version: VersionInfo, mappings: String?, target: MappingTarget): CompletableFuture<URI?> {
-        return this.getTinyMavenArtifact(version, target, false).thenApply { artifact -> artifact?.getURL() }
+        return this.getTinyMavenArtifact(version, target).thenApply { artifact -> artifact?.getURL() }
     }
 
     override fun getMappings(version: VersionInfo, mappings: String?, target: MappingTarget, cache: Path): CompletableFuture<MappingTree?> {
-        fun getMappingJarFs(intermediary: Boolean) : CompletableFuture<Pair<MavenArtifact, FileSystem>?> {
-            val jarFile = getPath(cache, version, mappings).resolve("${if (intermediary) "intermediary" else "feather"}-${target.id}.jar")
-            return getTinyMavenArtifact(version, target, intermediary).thenCompose { artifact ->
+        fun getMappingJarFs() : CompletableFuture<Pair<MavenArtifact, FileSystem>?> {
+            val jarFile = getPath(cache, version, mappings).resolve("feather-${target.id}.jar")
+            return getTinyMavenArtifact(version, target).thenCompose { artifact ->
                 if (artifact == null) {
                     return@thenCompose CompletableFuture.completedFuture(null)
                 }
@@ -418,22 +418,21 @@ class FeatherGen2MappingProvider(override val name: String, private val maven: U
                 }
             }
         }
-        val unpickMavenUrl = URI.create("https://maven.fabricmc.net/")  // use fabric's
-        val intermediaryJar = getMappingJarFs(true)
-        val featherJar = getMappingJarFs(false)
-        val intermediaryMappings = parseTinyMappingFromFileSystem(intermediaryJar)
+        // feather mapping itself already contains 3 namespaces: official, intermediary, named
+        val featherJar = getMappingJarFs()
         val featherMappings = parseTinyMappingFromFileSystem(featherJar)
+        val unpickMavenUrl = URI.create("https://maven.fabricmc.net/")  // use fabric's
         val unpickData = createUnpickDataFromJar(version, mappings, target, cache, featherJar, unpickMavenUrl)
-        return CompletableFuture.allOf(featherMappings, intermediaryMappings, unpickData).thenApply {
-            val im = intermediaryMappings.get() ?: return@thenApply null
-            val ym = featherMappings.get() ?: return@thenApply null
+        return CompletableFuture.allOf(featherMappings, unpickData).thenApply {
+            val fm = featherMappings.get() ?: return@thenApply null
             val ud = unpickData.get()
 
-            helper.setAndWriteMetadata(cache, version, mappings, ym.ver, ud)
-            helper.writeComment(cache, version, mappings, ym.mt, "named")
+            helper.setAndWriteMetadata(cache, version, mappings, fm.ver, ud)
+            helper.writeComment(cache, version, mappings, fm.mt, "named")
             helper.registerDecompileExtraFeatures(cache, version)
 
-            CombinedYarnMappingTree(im.mt, ym.mt, null)  // FIXME: unpick not supported yet
+            // FIXME: unpick not supported yet (feather uses unpick v1.3.0, which does not exists in fabric's maven)
+            fm.mt
         }
     }
 }
