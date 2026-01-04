@@ -54,7 +54,8 @@ interface MappingProvider {
         val QUILT_INTERMEDIARY = IntermediaryMappingProvider("quilt", URI("https://meta.quiltmc.org/v3/"), URI("https://maven.quiltmc.org/repository/release/"))
         val YARN = YarnMappingProvider("yarn", URI("https://meta.fabricmc.net/v2/"), URI("https://maven.fabricmc.net/"))
         val LEGACY_YARN = YarnMappingProvider("legacy-yarn", URI("https://meta.legacyfabric.net/v2/"), URI("https://maven.legacyfabric.net/"))
-        val FEATHER_GEN2 = FeatherGen2MappingProvider("feather-gen2", URI("https://maven.ornithemc.net/releases/"))
+        val FEATHER_GEN1 = FeatherMappingProvider("feather-gen1", URI("https://maven.ornithemc.net/releases/"), "feather")
+        val FEATHER_GEN2 = FeatherMappingProvider("feather-gen2", URI("https://maven.ornithemc.net/releases/"), "feather-gen2")
         val PARCHMENT = ParchmentMappingProvider("parchment", URI("https://maven.parchmentmc.org/"))
     }
 }
@@ -355,10 +356,10 @@ class YarnMappingProvider(override val name: String, private val meta: URI, priv
     }
 }
 
-class FeatherGen2MappingProvider(override val name: String, private val maven: URI) : CommonTinyMappingProvider(name, GenericTinyReader) {
+class FeatherMappingProvider(override val name: String, private val maven: URI, private val artifactId: String) : CommonTinyMappingProvider(name, GenericTinyReader) {
     override val namedName: String = "feather"
     private val allFeatherVersions: CompletableFuture<Map<String, String>?> by lazy {
-        requestText(maven.resolve("net/ornithemc/feather-gen2/maven-metadata.xml")).handle { it, e ->
+        requestText(maven.resolve("net/ornithemc/${artifactId}/maven-metadata.xml")).handle { it, e ->
             if (e != null) null else it
         }.thenApply {
             if (it.isNullOrEmpty()) return@thenApply null
@@ -393,7 +394,7 @@ class FeatherGen2MappingProvider(override val name: String, private val maven: U
             val fullVersion = versions?.get(version.id) ?:return@thenApply null
             MavenArtifact(maven, ArtifactSpec(
                 group = "net.ornithemc",
-                id = "feather-gen2",
+                id = artifactId,
                 version = fullVersion,
             ))
         }
