@@ -25,7 +25,15 @@ fun downloadAssets(version: VersionInfo, unit: ProgressUnit): CompletableFuture<
         // Reason: Mojang now keeps updating translation files for all MC versions >= 22w42a, and we don't want the latest translation file
         // See also: https://minecraft.wiki/w/Language?oldid=3085719#file-history:~:text=1.19.3-,22w42a,-Language%20files%20are
         val lastManifest = versionDetails.manifests.lastOrNull()
-        val bestManifest = if (versionDetails.manifests.any { it.lastModified == null }) null else versionDetails.manifests.minByOrNull { it.lastModified!! }
+        val bestManifest = versionDetails.manifests.let { manifests ->
+            if (manifests.any { it.lastModified == null }) {
+                if (versionDetails.manifests.any { it -> it.lastModified != null }) {
+                    output("assets", "not all manifests of version ${version.id} have lastModified, still take the last one")
+                }
+                versionDetails.manifests.lastOrNull()
+            }
+            else manifests.minByOrNull { it.lastModified!! }
+        }
         if (bestManifest == null) {
             output("assets", "no manifest for version ${version.id}, skipped")
             return CompletableFuture.completedFuture(null)
